@@ -54,7 +54,9 @@ package.json
 /venv/
 
 
-CLAUDE.md
 custom-addons/optimum_1/*
 docs/superpowers/*
 docs/tests/*
+# SDD subagent workspace (scratch, not source)
+.superpowers/
+/docs
