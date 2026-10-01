@@ -28,3 +28,6 @@
 [submodule "custom-addons/optimum_insurance_general"]
 	path = custom-addons/optimum_insurance_general
 	url = https://github.com/Optimum-Performance-ins/optimum_insurance_general.git
+[submodule "custom-addons/optimum_insurance_quality_assurance"]
+	path = custom-addons/optimum_insurance_quality_assurance
+	url = https://github.com/Optimum-Performance-ins/optimum_insurance_quality_assurance
