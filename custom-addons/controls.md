@@ -53,6 +53,39 @@ This document catalogs all controls that prevent write, delete, or modification 
 | **Condition** | Always on delete — removes related `vehicle.inspection.line` and orphaned inspections |
 | **Type** | Cascading cleanup (no error raised) |
 
+### C-141 — Cannot delete a cleared cheque
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.cheque` |
+| **File** | `models/insurance_cheque.py` (`unlink`) |
+| **Condition** | Any cheque in the recordset has `state == 'cleared'` — a cleared cheque is what pays its installments |
+| **Error** | _"Cheque %s is cleared and cannot be deleted. Move it out of cleared first."_ |
+| **FR** | FR-BASE-013-06-04 |
+
+### C-144 — Covered installment cannot be deleted
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `policy.payment.schedule` |
+| **File** | `models/policy_payment_schedule.py` (`unlink`) |
+| **Condition** | Any row in the recordset has `cheque_id` set (any cheque state); not bypassable by the endorsement engine — `_check_revert_allowed` refuses earlier with the same reason |
+| **Error** | _"%(line)s is covered by cheque %(cheque)s and cannot be deleted. Remove it from the cheque first."_ |
+| **FR** | FR-BASE-013-06-06 |
+
+### C-145 — Policy with a covered installment cannot be deleted
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.policy` |
+| **File** | `models/insurance_policy.py` (`unlink`) |
+| **Condition** | Any of the policy's `payment_schedule_ids` has `cheque_id` set — the DB cascade would silently break the covering cheques' sums |
+| **Error** | _"You cannot delete policy %(policy)s: %(count)d of its installments are covered by a cheque (e.g. %(cheque)s). Remove them from their cheques first."_ |
+| **FR** | FR-BASE-013-06-06 |
+
 ---
 
 ## 2. Write Validation (`write()` overrides)
@@ -86,6 +119,78 @@ This document catalogs all controls that prevent write, delete, or modification 
 | **File** | `models/insurance_request_shipment.py` (line ~148) |
 | **Condition** | On create and write — validates required location fields based on trip type |
 | **Errors** | _"Export From Location is required for Export Only and Export & Import trip types!"_, _"Export From Country is required when Export From Location is Specific Country!"_, and similar for all import/export location combinations |
+
+### C-140 — Cleared cheque is locked
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.cheque` |
+| **File** | `models/insurance_cheque.py` (`write` → `_check_cleared_lock`) |
+| **Condition** | Any cheque in the recordset has `state == 'cleared'` and the write touches a field of `_LOCKED_WHILE_CLEARED` (`name`, `bank_id`, `currency_id`, `amount`, `client_id`, `insurance_company_id`, `payment_date`, `line_ids`, `cheque_document`, `cheque_document_filename`). `state` and the chatter/activity fields stay writable so the cheque can leave cleared |
+| **Error** | _"Cheque %s is cleared and locked. Move it out of cleared (bounced, or back to deposited or received) before editing it."_ |
+| **FR** | FR-BASE-013-06-04 |
+
+### C-142 — Covered installment is locked until removed from its cheque; nothing joins a cleared cheque
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `policy.payment.schedule` |
+| **File** | `models/policy_payment_schedule.py` (`write` → `_check_covered_lock`) |
+| **Condition** | Row has `cheque_id` set (any cheque state) and the write touches a field of `_LOCKED_WHEN_COVERED` (`amount`, `due_date`, `cheque_id`), and is not exactly a detach (`cheque_id = False` alone); or `vals['cheque_id']` points at a cheque that is itself cleared. If the row's own `cheque_id.state == 'cleared'`, that message wins instead, checked first, and refuses even a detach. Bypass: `_renumbering_cheques` context only — no `_cheque_allocating` bypass, so the cheque form's own One2many commands are held to the same rule. The form sends LINK / UNLINK, which the ORM applies only to rows that change; a `(6, 0, ids)` SET on a cheque with covered rows re-writes them and is refused — code must use LINK / UNLINK (D-067) |
+| **Error** | _"%(line)s is paid by cheque %(cheque)s, which is cleared. Move the cheque out of cleared before changing the installment."_ / _"%(line)s is covered by cheque %(cheque)s. Remove it from the cheque before changing it."_ / _"Cheque %s is cleared; no installment can be added to it."_ |
+| **FR** | FR-BASE-013-06-06, FR-BASE-013-06-04 |
+
+### C-143 — Paid flag, payment date and net amount are system-set
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `policy.payment.schedule` |
+| **File** | `models/policy_payment_schedule.py` (`create`/`write` → `_check_system_set`) |
+| **Condition** | `is_paid`, `payment_date` or `net_amount` present in `vals`, outside the system's own `_installment_system_write` context |
+| **Error** | _"%s on an installment are set by the system and cannot be edited."_ |
+| **FR** | FR-BASE-006-11-21, FR-BASE-006-11-23 |
+
+### C-153 — Clearing a cheque re-asserts its coverage
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.cheque` |
+| **File** | `models/insurance_cheque.py` (`write` → `_write_and_assert_cleared`) |
+| **Method** | `write()` |
+| **Condition** | `vals.get('state') == 'cleared'`: any record now cleared has an empty `line_ids`, or the cheque entering cleared fails its own `_check_lines_consistent()` (same insurer, same currency, Σ installment amounts = cheque amount, C-138) |
+| **Error** | _"Cheque %s covers no installment and cannot be cleared."_ / the three C-138 messages, raised from `_check_lines_consistent()` |
+| **FR** | FR-BASE-013-06-04 |
+| **Purpose** | Clearing is the payment event — it is what marks every covered installment paid and earns the bonus. `_check_lines_consistent()` alone is not enough at that moment: it skips an empty `line_ids` (valid in every other state), and a row-side `cheque_id` write can skip its own re-check under the `_cheque_allocating` context (C-138), which exists precisely so the cheque's own commands are not rejected mid-batch. Without this control a cheque could be cleared covering nothing, or covering the wrong total, and the cleared lock (C-140) would then make it hard to correct. The write and the re-check run inside one savepoint so a refusal leaves the cheque untouched rather than tentatively cleared. |
+
+### C-156 — The first installment covers the administrative fees
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `policy.payment.schedule` (rule), checked for `insurance.policy` and `insurance.policy.endorsement` |
+| **File** | `models/policy_payment_schedule.py` (`_check_first_installment_covers_fees`), called from `insurance.commission.mixin._assign_installment_net_amounts()`, `accept.offer.wizard._action_accept()` and `insurance.policy.endorsement._validate_settlement()` |
+| **Method** | `_check_first_installment_covers_fees()` |
+| **Condition** | The owner's first installment (lowest due date, then creation order) is positive and smaller than the owner's administrative fees (`amount < fees`). A negative first installment — an endorsement's refund — is not checked (D-070). Administrative fees = `gross_premium − net_premium` (policy) or `gross_delta − net_delta` (endorsement). |
+| **Error** | _"The first installment (due %(date)s) is %(amount)s but the administrative fees of %(owner)s are %(fees)s. The first installment must cover them."_ |
+| **FR** | FR-BASE-006-11-24 |
+| **Purpose** | D-065: the first installment absorbs the gap between gross and net, so it must be at least that large. Checked at schedule creation (before the policy exists, before the endorsement applies) and whenever an amount or due-date change makes a different installment first. Skipped while the endorsement engine is creating or deleting rows (`_endorsement_applying`); the engine checks once the schedule is complete. |
+
+### C-157 — A covered installment's net amount never moves
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `policy.payment.schedule` |
+| **File** | `models/mixins/insurance_commission_mixin.py` (`_assign_installment_net_amounts`) |
+| **Method** | `_assign_installment_net_amounts()` |
+| **Condition** | A create, delete, amount or due-date change on any installment of an owner would change the `net_amount` of an installment of that owner that has a `cheque_id` (any cheque state). |
+| **Error** | _"%(line)s is covered by cheque %(cheque)s. This change would move the administrative fees of %(owner)s onto or off it. Remove it from the cheque first."_ |
+| **FR** | FR-BASE-006-11-23, FR-BASE-013-06-06 |
+| **Purpose** | D-066 applied to the one figure another row's edit can move: a covered installment cannot be modified, and its net amount is the basis of its bonus. Without it, moving an uncovered installment before a cleared first one would silently change a paid bonus (D-069 A3). |
 
 ---
 
@@ -127,9 +232,9 @@ This document catalogs all controls that prevent write, delete, or modification 
 |-----------|-------|
 | **Module** | `optimum_insurance_medical` |
 | **Model** | `insurance.offer` (inherited) |
-| **File** | `models/insurance_offer.py` (line ~104) |
-| **Constrains** | `coverage_ids` |
-| **Behavior** | Overrides base `_check_has_coverage` — skips coverage check for medical offers (uses medical categories instead) |
+| **File** | `models/insurance_offer.py` (line ~134) |
+| **Constrains** | `coverage_ids`, `stage` (must repeat the base triggers — re-declaring `@api.constrains` replaces them) |
+| **Behavior** | Overrides base `_check_has_coverage` — skips coverage check for medical offers (uses medical categories instead); non-medical offers keep the base check |
 
 ### C-10 — Client must have exactly one specialized record
 
@@ -464,6 +569,70 @@ This pattern is replicated across all type-specific junction tables:
 
 ---
 
+### C-134 — Commission batch accepts only policies with a commission
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.commission.batch` |
+| **File** | `models/insurance_commission_batch.py` |
+| **Constrains** | `policy_ids` |
+| **Condition** | Any batched policy has `commission_amount <= 0` (checked as superuser: the field is accountant-only, C-136, and the sysadmin also runs batches; this replaced the former `policy_ids` domain clause) |
+| **Error** | _"These policies have no commission and cannot be batched: %s"_ |
+| **FR** | FR-BASE-013-02-02 |
+
+---
+
+### C-137 — Per-person limit is 0 when inactive and never negative when active
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.coverage.mixin` (persistent coverage rows: `offer.has.coverage`, `policy.has.coverage`; transient rows skip it unless `force_coverage_validation`), `endorsement.change.line.wizard` (its `wiz_cov_per_person_*` shadow fields) |
+| **File** | `models/mixins/insurance_coverage_mixin.py` (`validate_dimension`, called by `_check_dimensions`), `wizards/endorsement_change_line_wizard.py` (`_validate_wiz_cov_dimensions`) |
+| **Constrains** | `per_person_active`, `per_person_limit` (via `COVERAGE_DIMENSION_FIELDS`) |
+| **Condition** | `per_person_active = False` and `per_person_limit != 0`; or `per_person_active = True` and `per_person_limit < 0`. No minimum above 0 while active: the currently supported insurance types need no person to be insured on. The activation onchange seeds 1 as a convenience only. |
+| **Error** | _"%s is inactive; persons covered must be 0."_ / _"%s persons covered cannot be negative."_ |
+| **FR** | FR-BASE-011-02-08 |
+
+### C-138 — Cheque installments: same insurer, same policy holder, same currency, sum to the cheque amount
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.cheque` (`_check_lines_consistent`), `policy.payment.schedule` (`_check_cheque_company`, `_check_cheque_client`, `create()`, `write()`) |
+| **File** | `models/insurance_cheque.py`, `models/policy_payment_schedule.py` (`_check_cheque_company`, `_check_cheque_client`, `_allocating_from_cheque()`, `create()`, `write()`) |
+| **Constrains** | `insurance.cheque`: `line_ids`, `amount`, `currency_id`, `insurance_company_id`, `client_id`. `policy.payment.schedule`: `cheque_id` |
+| **Condition** | Any covered installment belongs to another insurance company, or to a policy whose holder is not the cheque's client, or is in another currency, or Σ(installment amounts) ≠ cheque amount; also a `cheque_id` create/write on the installment outside the cheque's own One2many commands (`_cheque_allocating` context, read by the shared helper `_allocating_from_cheque()`) that would break the old or new cheque's sum. The aggregate/currency rule lives on the cheque because a cheque's installments change through One2many commands that link/unlink rows one write at a time; the insurer and holder rules are also enforced per row so they are safe mid-way through those commands. A row-side `cheque_id` create or write (not carrying `_cheque_allocating`) re-checks the cheque(s) involved explicitly from `policy.payment.schedule.create()`/`write()`, since `insurance.cheque`'s own `@api.constrains` never fires from a row create or write. Also re-asserted when a cheque enters `cleared` (C-153) |
+| **Error** | _"Installment %(line)s belongs to %(company)s and cannot be covered by cheque %(cheque)s of %(other)s."_ / _"Installment %(line)s belongs to %(holder)s and cannot be covered by cheque %(cheque)s of %(other)s."_ / _"Cheque %(cheque)s is in %(currency)s; installment %(line)s is not."_ / _"The installments covered by cheque %(cheque)s total %(total)s, but the cheque amount is %(amount)s. They must match exactly."_ |
+| **FR** | FR-BASE-013-06-03 |
+
+### C-146 — Endorsement change lines for installments are add-only
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.policy.endorsement.line` |
+| **File** | `models/insurance_policy_endorsement_line.py` (`_check_installment_lines_add_only`), also enforced in `wizards/endorsement_change_line_wizard.py` (`_validate_cheque_line`, `_onchange_operation`) |
+| **Constrains** | `operation`, `target_record`, `before_values`, `after_values` |
+| **Condition** | A line whose target model is `policy.payment.schedule` has `operation` other than `add` |
+| **Error** | _"An endorsement can only add installments. Existing installments are never modified or removed; add a refund installment instead."_ |
+| **FR** | FR-BASE-007-08-03 |
+
+### C-151 — Cheque scan required, PDF or image
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.cheque` |
+| **File** | `models/insurance_cheque.py` (`_check_cheque_document`) |
+| **Constrains** | `cheque_document`, `cheque_document_filename` |
+| **Condition** | `cheque_document` is not set, or `cheque_document_filename` does not end with `.pdf`, `.png`, `.jpg` or `.jpeg` (case-insensitive); enforced through `default=False`, which puts the field in every create's values — `required=True` alone is a client hint for attachment binaries |
+| **Error** | _"Cheque %s needs a scan of the physical cheque."_ / _"The scan of cheque %s must be a PDF or an image (.pdf, .png, .jpg, .jpeg)."_ |
+| **FR** | FR-BASE-013-06-09 |
+
+---
+
 ## 4. SQL Constraints (`models.Constraint`)
 
 ### 4a. UNIQUE Constraints
@@ -771,6 +940,17 @@ This pattern is replicated across all type-specific junction tables:
 | **SQL** | `CHECK(minimum_price <= price AND price <= maximum_price)` |
 | **Error** | _"Average price must be between minimum and maximum price!"_ |
 
+### C-139 — Cheque amount cannot be zero
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.cheque` |
+| **File** | `models/insurance_cheque.py` |
+| **SQL** | `CHECK(amount <> 0)` |
+| **Error** | _"A cheque amount cannot be zero."_ |
+| **FR** | FR-BASE-013-06-01 — the amount is signed (a refund cheque is negative), so only zero is invalid |
+
 ---
 
 ## 5. Foreign Key Restrictions (`ondelete='restrict'`)
@@ -794,6 +974,9 @@ These prevent deletion of parent records when child records reference them.
 | **C-68** | `client.corporate` | `industry_id` | `res.partner.industry` with corporates | `models/client_corporate.py` |
 | **C-69** | `corporate.client.individual` | `insurance_type_id` | `insurance.type` with employments | `models/corporate_client_individual.py` |
 | **C-70** | `insurance.company.has.employee` | `insurance_type_id` | `insurance.type` with company employees | `models/insurance_company_employee.py` |
+| **C-148** | `insurance.cheque` | `bank_id` | `res.bank` with cheques | `models/insurance_cheque.py` |
+| **C-148** | `insurance.cheque` | `client_id` | `client` with cheques | `models/insurance_cheque.py` |
+| **C-148** | `insurance.cheque` | `insurance_company_id` | `insurance.company` with cheques | `models/insurance_cheque.py` |
 
 ### Medical Module (`optimum_insurance_medical`)
 
@@ -975,6 +1158,79 @@ These prevent deletion of parent records when child records reference them.
 | **Condition** | Any `vehicle.inspection.line` has no `body_part_ids` |
 | **Error** | _"Cannot complete inspection: the following vehicles have no body parts recorded: %s"_ |
 
+### C-135 — Accept-offer wizard: only pricing team leaders and sysadmin
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `accept.offer.wizard`, `accept.offer.wizard.payment.line`, `insurance.offer`, `insurance.policy` |
+| **File** | `security/ir.model.access.csv`, `security/security.xml`, `wizards/accept_offer_wizard.py`, `models/insurance_offer.py` |
+| **Mechanism** | ACL: the two wizard models are accessible only to `group_insurance_pricing_team_leader` (RWC) and `base.group_system` (RWCU); no other group can read them. Gate in `accept.offer.wizard.action_accept()`, as the acting user: `insurance.offer._check_accept_authorization()` (also called by the button `action_accept_offer()`), `offer.check_access('write')` (keeps the leader record rule on offers effective) and `offer._check_acceptable()` (the button's preconditions, shared). Past the gate `_action_accept()` builds the policy as superuser; type modules extend `_action_accept()` only. Record rule `rule_insurance_policy_pricing_leader`: leaders read only policies whose `offer_id.pricing_team_id.leader_id` is them. `create_uid` stays the acceptor. |
+| **Error** | _"Only pricing team leaders and sysadmin can accept an offer."_ / _"Cannot accept offer: The client must accept the offer first."_ / standard record-rule AccessError |
+| **FR** | FR-BASE-020-13 (-01 to -04) |
+
+### C-149 — Endorsement cannot be reverted while an installment it created is covered
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.policy.endorsement` |
+| **File** | `models/insurance_policy_endorsement.py` (`_check_revert_allowed`, called by `action_revert_changes`) |
+| **Method** | `action_revert_changes()` |
+| **Condition** | Any of the endorsement's schedule lines has a `target_record` with `cheque_id` set (any cheque state); every such line is an `add` under C-146 |
+| **Error** | _"Endorsement %(number)s cannot be reverted: installment %(line)s is covered by cheque %(cheque)s."_ |
+| **FR** | FR-BASE-007-08-07, FR-BASE-013-06-06 |
+
+### C-150 — Clearing a cheque with mixed due dates is confirmed first
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.cheque` |
+| **File** | `models/insurance_cheque.py` (`action_clear` → `insurance.cheque.clear.wizard`) |
+| **Method** | `action_clear()` |
+| **Condition** | `len(set(line_ids.due_date)) > 1` and the context does not carry `skip_due_date_warning` |
+| **Behavior** | Not an error, a confirmation — opens `insurance.cheque.clear.wizard` listing the installments and their due dates; `action_confirm_clear()` re-calls `action_clear()` with `skip_due_date_warning` set. Clearing through code (`write({'state': 'cleared'})`) never goes through here |
+| **FR** | FR-BASE-013-06-08 |
+
+### C-152 — Register Cheque refuses a bad selection
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `policy.payment.schedule` |
+| **File** | `models/policy_payment_schedule.py` (`action_register_cheque`, list-header button of `view_policy_payment_schedule_list` and `view_policy_payment_schedule_list_all`, `groups=` accountant) |
+| **Method** | `action_register_cheque()` |
+| **Condition** | Empty selection; any selected row already has `cheque_id` set; the selection spans more than one `policy_id.insurance_company_id`; the selection spans more than one `policy_id.policy_holder_id`; the selection spans more than one `currency_id`; or the selected installments total zero (`currency.is_zero(Σ amount)`). The button's `groups=` is a client-side filter only — `action_register_cheque()` itself has no server-side accountant check; the cheque `create()` it leads to (accountant/sysadmin ACL only, D-060) is what actually refuses a non-accountant who reaches the method some other way |
+| **Error** | _"Select the installments the cheque covers first."_ / _"%(line)s is already covered by cheque %(cheque)s."_ / _"One cheque covers installments of one insurance company only; the selection spans %s."_ / _"One cheque is in one currency only; the selection spans %s."_ / _"The selected installments total zero; a cheque cannot be for nothing."_ |
+| **FR** | FR-BASE-013-06-05 |
+
+### C-154 — Endorsement settlement shape gate at apply / schedule
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.policy.endorsement` |
+| **File** | `models/insurance_policy_endorsement.py` (`_validate_settlement`, called from `action_apply_changes()` and the scheduling path) |
+| **Method** | `_validate_settlement()` |
+| **Condition** | `settlement_direction != 'none'` and the endorsement's installment lines (`_cheque_lines()`) are empty, or `settlement_balanced` is false (installment lines do not sum to the gross premium change) |
+| **Error** | _"Endorsement %s changes the premium but adds no installment."_ / _"Endorsement %(number)s is not balanced: its installment lines move %(total)s but the gross premium change is %(delta)s."_ |
+| **FR** | FR-BASE-007-08-06 |
+| **Purpose** | This branch reworded the refusal and, by merging the pre-existing C10 into it, made `_validate_settlement()` the only settlement-shape gate left at apply and at schedule (D-057) — `_check_settlement_shape()` (C1) only guards direction/amount coherence at save, not the balance, since the wizard adds installment lines one at a time. |
+
+### C-155 — Corporate lead conversion needs a gender on every contact
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `crm.lead.to.client` |
+| **File** | `wizards/crm_lead_to_client.py` (`action_convert()`); contact popup marks `gender` required in `wizards/crm_lead_to_client_views.xml` |
+| **Method** | `action_convert()` |
+| **Condition** | `action == 'create'`, `client_type == 'corporate'`, and any contact line has no `gender` |
+| **Error** | _"Please set the gender of these contacts before converting: %s"_ |
+| **FR** | BR-BASE-003-02-06 |
+| **Purpose** | Each contact line becomes a `client.individual`, whose `gender` is required (NOT NULL). The line's own field stays optional because `default_get` auto-fills a contact from the lead without one; this guard turns the database error into a readable message. |
+
 ---
 
 ## 7. View Readonly Controls
@@ -1099,6 +1355,17 @@ These fields become readonly based on business state, preventing modification at
 | **Fields affected** | `client_id`, `inspection_datetime`, `inspector_name`, `inspector_phone`, `inspector_email`, `notes`, `inspection_document` |
 | **Purpose** | Prevents modification of original inspection data once inspection is completed |
 
+### C-147 — Cheque and paid-installment fields readonly
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **View** | `views/insurance_cheque_views.xml` (cheque form: every business field and `line_ids`); `views/insurance_policy_views.xml` (Manage Payments list); `views/policy_payment_schedule_views.xml` (`view_policy_payment_schedule_list_all`, same readonly rules) |
+| **Condition** | `views/insurance_cheque_views.xml`: `readonly="state == 'cleared'"`. `views/insurance_policy_views.xml`: `cheque_id`, `amount`, `sequence` readonly in the arch; `is_paid` and `payment_date` readonly from the Python field definition (C-143); `due_date` readonly="cheque_id" in both lists (a covered installment's due date locks in every cheque state, not only cleared, FR-BASE-013-06-06) |
+| **Fields affected** | Cheque form: `name`, `bank_id`, `client_id`, `insurance_company_id`, `payment_date`, `currency_id`, `amount`, `line_ids`, `cheque_document`, `cheque_document_filename` (invisible, but in `_LOCKED_WHILE_CLEARED`). Manage Payments list: `due_date`, `cheque_id`, `is_paid`, `payment_date`, `amount`, `sequence`. All-installments list (`view_policy_payment_schedule_list_all`): same fields, plus `policy_holder_id`, `insurance_company_id` readonly |
+| **Purpose** | A cleared cheque has paid its covered installments; the cheque's own data locks until it leaves cleared, and the installment's due date locks as soon as it is covered by a cheque, in any cheque state (C-142) — not only while cleared, while paid flag, payment date, cheque link, amount and installment number are always system-set. The Manage Payments list's Register Cheque button is accountant-only (`groups="optimum_insurance_base.group_insurance_accountant"`); its own refusals (empty selection, a covered installment, or a selection spanning two insurance companies, two currencies, or totalling zero) live in `action_register_cheque` (FR-BASE-013-06-05), not in the view |
+| **FR** | FR-BASE-013-06-04, FR-BASE-013-06-06, FR-BASE-006-11-21, FR-BASE-013-06-05 |
+
 ### 7b. Always-Readonly Fields (computed / reference / system-generated)
 
 These fields are always `readonly="1"` because they are computed, system-generated, or reference fields that should not be manually edited.
@@ -1109,7 +1376,7 @@ These fields are always `readonly="1"` because they are computed, system-generat
 |--------|---------|
 | `name` | Auto-generated offer name |
 | `prev_net_premium`, `prev_gross_premium`, `prev_sum_insurance`, `prev_gross_rate`, `prev_insurance_duration`, `prev_number_of_cheques` | Previous version comparison values |
-| `wording_review_status`, `reviewer_id`, `reviewed_date` | Review status and reviewer |
+| `reviewer_id`, `reviewed_date` | Reviewer and review timestamp |
 | `inspection_id`, `previous_offer_id`, `child_offer_count` | Reference / computed |
 | `mandatory_coverage_status` | Computed widget |
 | `prev_coverage_*`, `prev_deductible_*`, `prev_copayment_*` fields | Previous version comparison values in coverage/deductible/copayment lines |
@@ -1215,6 +1482,37 @@ These fields are always `readonly="1"` because they are computed, system-generat
 | `policy_has_estate_views.xml` | Same + `policy_id`, `policy_holder_id`, `policy_state` | Derived from estate |
 | `request_has_estate_views.xml` | Same + `insurance_request_id`, `client_id` | Derived from estate |
 | `client_insurable_estate_views.xml` | `name`, `is_insured` | Computed |
+
+### 7c. No-Create Relational Pickers (`options="{'no_create': True}"`)
+
+These Many2one pickers may only select records that already exist. Both the dropdown quick-create and the "Create and edit..." dialog are disabled.
+
+### C-133 — Endorsement change line target record pickers cannot create records
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **View** | `wizards/endorsement_change_line_wizard_views.xml` |
+| **FR** | - |
+| **Condition** | `options="{'no_create': True, 'no_create_edit': True}"` |
+| **Fields affected** | `target_coverage_id`, `target_deductible_id`, `target_service_id`, `target_shared_limit_id`, `target_beneficiary_id`, `target_private_term_id`, `target_exclusion_id` |
+| **Purpose** | The Target Record pickers identify which existing policy record an endorsement line edits or removes. Creating a record from the picker would write directly to the policy, bypassing the endorsement apply/revert engine and leaving an untracked change. Records are added to a policy only through an endorsement line with operation `add` |
+
+#### C-133-01 — Medical target record pickers cannot create records
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_medical` |
+| **View** | `wizards/endorsement_change_line_wizard_views.xml` |
+| **Fields affected** | `target_employee_id`, `target_medical_category_id`, `target_benefit_type_id`, `target_coverage_item_id` |
+
+#### C-133-02 — Vehicle target record picker cannot create records
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_vehicle` |
+| **View** | `wizards/endorsement_change_line_wizard_views.xml` |
+| **Fields affected** | `target_vehicle_id` |
 
 ---
 
@@ -1355,20 +1653,37 @@ When a policy is generated from an accepted offer on an `insurance.request`, all
 | **Buttons affected** | `action_client_accept_offer`, `action_record_response_not_ready`, `action_accept_offer`, `action_create_negotiated_offer`, `action_negotiate_offer`, `action_send_offer_to_client`, `action_send_not_ready`, `action_send_to_insurance_company` |
 | **Purpose** | Hides all workflow action buttons on offers when the parent request already has a generated policy |
 
+## 9. Field Access Controls (`groups=`)
+
+### C-136 — Commission fields are accountant-only
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.commission.mixin` (so `insurance.policy` and `insurance.policy.endorsement`), `insurance.policy` |
+| **File** | `models/mixins/insurance_commission_mixin.py`, `models/insurance_policy.py`, `views/insurance_policy_views.xml`, `views/insurance_policy_endorsement_views.xml` |
+| **Fields** | Mixin: `is_commission_exception`, `commission_rate`, `contract_id`, `commission_amount`, `early_payment_bonus`, `commission_bonus_basis`, `commission_bonus`, `total_commission_amount`. Policy roll-ups: `current_commission_amount`, `current_commission_bonus`, `current_total_commission_amount`. The endorsement's related contract/toggle/rate inherit the group from their policy target. |
+| **Mechanism** | `groups='optimum_insurance_base.group_insurance_accountant'` on the field; the ORM refuses any Python attribute read, `read()`, fetch, `write()`/`create()` and search domains on it for non-members. The policy form's Commission page and the endorsement form's Commission page carry the same `groups=` so non-accountants see no empty heading. System paths run as superuser: `_earn_early_payment_bonus` (sudo), the policy's stored `current_*` roll-ups (stored computes run as superuser), the accept-offer wizard (C-135), the batch's invoice lines and C-134. |
+| **Also** | Accountants hold read-only ACL on `insurance.policy`, `insurance.policy.endorsement` and `insurance.policy.endorsement.line` so the gated figures are reachable by someone. |
+| **Error** | Odoo's standard field access error (_"You do not have enough rights to access the fields ..."_) |
+| **FR** | FR-BASE-007-09-08 |
+
 ---
 
 ## Summary
 
 | Category | Count |
 |----------|-------|
-| Delete Prevention (unlink) | 4 |
-| Write Validation (write) | 3 |
-| Python Constraints (@api.constrains) | 26 (with sub-controls) |
+| Delete Prevention (unlink) | 7 |
+| Write Validation (write) | 7 |
+| Python Constraints (@api.constrains) | 43 (with sub-controls) |
 | SQL UNIQUE Constraints | 22 (with sub-controls) |
-| SQL CHECK Constraints | 9 (with sub-controls) |
-| Foreign Key Restrictions (ondelete restrict) | 48 |
-| Action Method Guards | 12 |
+| SQL CHECK Constraints | 10 (with sub-controls) |
+| Foreign Key Restrictions (ondelete restrict) | 51 rows (49 controls: C-148 covers three FKs) |
+| Action Method Guards | 17 |
 | Post-Policy Immutability | 13 (C-126 through C-132, with sub-controls C-130-01 to C-130-04, C-131-01, C-131-02) |
-| Conditional View Readonly | 8 patterns (with 6 extensions) |
+| Conditional View Readonly | 9 patterns (with 4 extensions) |
 | Always-Readonly View Fields | 100+ fields across all modules |
-| **Total named controls** | **C-01 through C-132 (with sub-controls)** |
+| No-Create Relational Pickers | 1 pattern (with 2 extensions) |
+| Field Access Controls (groups=) | 1 (C-136) |
+| **Total named controls** | **C-01 through C-155 (with sub-controls)** |
