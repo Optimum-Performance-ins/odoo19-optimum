@@ -31,3 +31,6 @@
 [submodule "custom-addons/optimum_insurance_quality_assurance"]
 	path = custom-addons/optimum_insurance_quality_assurance
 	url = https://github.com/Optimum-Performance-ins/optimum_insurance_quality_assurance
+[submodule "custom-addons/optimum_insurance_collection"]
+	path = custom-addons/optimum_insurance_collection
+	url = https://github.com/Optimum-Performance-ins/optimum_insurance_collection
