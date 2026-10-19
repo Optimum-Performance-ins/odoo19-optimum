@@ -86,6 +86,45 @@ This document catalogs all controls that prevent write, delete, or modification 
 | **Error** | _"You cannot delete policy %(policy)s: %(count)d of its installments are covered by a cheque (e.g. %(cheque)s). Remove them from their cheques first."_ |
 | **FR** | FR-BASE-013-06-06 |
 
+### C-174 — A figure an incentive or a formula figure uses cannot be deleted
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.incentive.figure` |
+| **File** | `models/insurance_incentive_figure.py` (`_unlink_except_in_use`, `@api.ondelete`; `user_figure_ids`). Python only, no database `restrict` (D-144) |
+| **Condition** | any incentive picks the figure, or any formula figure uses it, read as superuser |
+| **Error** | _"Figure %(code)s is in use and cannot be deleted. ⏎ المؤشر %(code)s مستخدم ولا يمكن حذفه."_ |
+| **FR** | FR-BASE-009-05-19, FR-BASE-009-05-24, BR-BASE-010-03-04 |
+
+### C-198 — A batched installment cannot be deleted
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `policy.payment.schedule` |
+| **File** | `models/policy_payment_schedule.py` (`unlink`, first lines, before C-144) |
+| **Mechanism** | an `unlink()` guard, not an FK `restrict`: the batch line's `installment_id` is `ondelete='set null'` (D-185), so a row named only by a cancelled batch can go and its line keeps its snapshot |
+| **Condition** | any row in the recordset has `is_commission_batched` (a line of a draft, sent or confirmed batch holds it). Example: deleting POL-0042 #1 while it is in CB/2026/0005 → refused, the message names the batch. |
+| **Error** | _"Installment %(inst)s is in commission batch %(batch)s and cannot be deleted. Remove it from the batch or cancel the batch first. ⏎ القسط %(inst)s مدرج في دفعة العمولة %(batch)s ولا يمكن حذفه. أزله من الدفعة أو ألغِ الدفعة أولاً."_ |
+| **FR** | FR-BASE-013-02-01, FR-BASE-013-06-14 |
+| **Tests** | `TestCommissionBatchLines.test_08` |
+
+### C-190 — Only a draft batch can be deleted
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.commission.batch` |
+| **File** | `models/insurance_commission_batch.py` (`unlink`) |
+| **Mechanism** | `unlink()` guard (D-181). A draft's `line_ids` are unlinked through the ORM first, so their installments' `is_commission_batched` recomputes at once (plan Review Focus 1). |
+| **Condition** | any batch in the recordset is not `draft`. Example: CB/2026/0005 sent, or cancelled with "Wrong insurer" → refused; a cancelled batch keeps its reason trail. Deleting a draft frees POL-0042 #2 for another batch. |
+| **Error** | _"Only draft batches can be deleted. Cancel a sent batch instead. ⏎ لا يمكن حذف إلا الدفعات المسودة. ألغِ الدفعة المرسلة بدلاً من ذلك."_ |
+| **FR** | FR-BASE-013-02-07 |
+| **Tests** | `TestCommissionBatch.test_08_only_draft_batches_can_be_deleted` |
+
+See C-168 (incentive payout).
+
 ---
 
 ## 2. Write Validation (`write()` overrides)
@@ -127,7 +166,7 @@ This document catalogs all controls that prevent write, delete, or modification 
 | **Module** | `optimum_insurance_base` |
 | **Model** | `insurance.cheque` |
 | **File** | `models/insurance_cheque.py` (`write` → `_check_cleared_lock`) |
-| **Condition** | Any cheque in the recordset has `state == 'cleared'` and the write touches a field of `_LOCKED_WHILE_CLEARED` (`name`, `bank_id`, `currency_id`, `amount`, `client_id`, `insurance_company_id`, `payment_date`, `line_ids`, `cheque_document`, `cheque_document_filename`). `state` and the chatter/activity fields stay writable so the cheque can leave cleared |
+| **Condition** | Any cheque in the recordset has `state == 'cleared'` and the write touches a field of `_LOCKED_WHILE_CLEARED` (`name`, `bank_id`, `currency_id`, `amount`, `client_id`, `insurance_company_id`, `payment_date`, `line_ids`, `payment_method`, `cheque_document`, `cheque_document_filename`). Amended by D-175 and D-254 (one payment-proof pair; a transfer's number is its `name`). `state` and the chatter/activity fields stay writable so the cheque can leave cleared |
 | **Error** | _"Cheque %s is cleared and locked. Move it out of cleared (bounced, or back to deposited or received) before editing it."_ |
 | **FR** | FR-BASE-013-06-04 |
 
@@ -142,16 +181,17 @@ This document catalogs all controls that prevent write, delete, or modification 
 | **Error** | _"%(line)s is paid by cheque %(cheque)s, which is cleared. Move the cheque out of cleared before changing the installment."_ / _"%(line)s is covered by cheque %(cheque)s. Remove it from the cheque before changing it."_ / _"Cheque %s is cleared; no installment can be added to it."_ |
 | **FR** | FR-BASE-013-06-06, FR-BASE-013-06-04 |
 
-### C-143 — Paid flag, payment date and net amount are system-set
+### C-143 — Paid flag, payment date, net amount, bonus, receipt-pointer and batched fields are system-set
 
 | Attribute | Value |
 |-----------|-------|
 | **Module** | `optimum_insurance_base` |
 | **Model** | `policy.payment.schedule` |
 | **File** | `models/policy_payment_schedule.py` (`create`/`write` → `_check_system_set`) |
-| **Condition** | `is_paid`, `payment_date` or `net_amount` present in `vals`, outside the system's own `_installment_system_write` context |
-| **Error** | _"%s on an installment are set by the system and cannot be edited."_ |
-| **FR** | FR-BASE-006-11-21, FR-BASE-006-11-23 |
+| **Condition** | `is_paid`, `payment_date`, `net_amount`, `bonus_tier_id`, `bonus_amount`, `has_premium_schedule`, `premium_schedule_reference_number` or `is_commission_batched` present in `vals`, unless the write runs in superuser mode **and** under the system's own `_installment_system_write` context. Both are required (D-073): the context of an RPC call is whatever the client sent, so the key alone is no proof the system is writing; superuser mode cannot be sent. Only `net_amount` is ever written that way; the others are stored computes, flushed by the ORM without `write()` (D-083). Amended (D-186): the two receipt-pointer fields (FR-BASE-006-11-27) joined the set, since the accountant has write on installments; so did `is_commission_batched` (FR-BASE-013-02-03) |
+| **Error** | _"Cannot edit %s on an installment: set by the system."_ |
+| **FR** | FR-BASE-006-11-21, FR-BASE-006-11-23, FR-BASE-006-11-25, FR-BASE-006-11-27, FR-BASE-013-02-03 |
+| **Tests** | `TestPremiumSchedule.test_14_the_pointer_is_not_written_by_hand` (the receipt-pointer fields), `TestCommissionBatchLines.test_06` (`is_commission_batched`) |
 
 ### C-153 — Clearing a cheque re-asserts its coverage
 
@@ -179,18 +219,209 @@ This document catalogs all controls that prevent write, delete, or modification 
 | **FR** | FR-BASE-006-11-24 |
 | **Purpose** | D-065: the first installment absorbs the gap between gross and net, so it must be at least that large. Checked at schedule creation (before the policy exists, before the endorsement applies) and whenever an amount or due-date change makes a different installment first. Skipped while the endorsement engine is creating or deleting rows (`_endorsement_applying`); the engine checks once the schedule is complete. |
 
-### C-157 — A covered installment's net amount never moves
+### C-160 — An issued policy's premiums are never edited
 
 | Attribute | Value |
 |-----------|-------|
 | **Module** | `optimum_insurance_base` |
-| **Model** | `policy.payment.schedule` |
-| **File** | `models/mixins/insurance_commission_mixin.py` (`_assign_installment_net_amounts`) |
-| **Method** | `_assign_installment_net_amounts()` |
-| **Condition** | A create, delete, amount or due-date change on any installment of an owner would change the `net_amount` of an installment of that owner that has a `cheque_id` (any cheque state). |
-| **Error** | _"%(line)s is covered by cheque %(cheque)s. This change would move the administrative fees of %(owner)s onto or off it. Remove it from the cheque first."_ |
-| **FR** | FR-BASE-006-11-23, FR-BASE-013-06-06 |
-| **Purpose** | D-066 applied to the one figure another row's edit can move: a covered installment cannot be modified, and its net amount is the basis of its bonus. Without it, moving an uncovered installment before a cleared first one would silently change a paid bonus (D-069 A3). |
+| **Model** | `insurance.policy` |
+| **File** | `models/insurance_policy.py` (`write`, `_ISSUED_LOCKED_FIELDS`) |
+| **Method** | `write()` |
+| **Condition** | `net_premium` or `gross_premium` present in `vals` on an existing policy, in any state, whatever the value (the bare rule, D-067). No bypass: superuser, system administrator and system code are refused alike. Creation is not affected. |
+| **Error** | _"The net and gross premium of policy '%(name)s' were fixed when it was issued and cannot be edited. Change the premium through an endorsement."_ |
+| **FR** | FR-BASE-006-13-01 |
+| **Purpose** | D-084. The installments' net amounts, their commission slices and the first-installment rule (C-156) are all derived from the issued premiums; a later edit would leave every stored net amount wrong and, on a policy whose first installment is covered, make the next schedule edit hit C-157 with no way out but bouncing a paid cheque. An endorsement changes the premium through its own deltas, whose amounts are locked once applied (FR-BASE-007-08-08). A `write()` guard rather than `@api.constrains`: a constraint sees only the new value and also runs at creation. |
+
+### C-163 — An incentive's contract is fixed at creation
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.incentive` |
+| **File** | `models/insurance_incentive.py` (`write`) |
+| **Condition** | `contract_id` is among the written keys |
+| **Error** | _"An incentive's contract cannot be changed. Save it to the library and add it to the other contract instead. ⏎ لا يمكن تغيير عقد الحافز. احفظه في الحوافز المحفوظة ثم أضفه إلى العقد الآخر."_ |
+| **FR** | FR-BASE-009-05-01, BR-BASE-010-03-02 |
+| **Purpose** | A payout must never change contract behind its record. Reuse is a copy (FR-BASE-009-05-09). |
+
+### C-168 — A claimed or paid payout is frozen
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.incentive.payout` |
+| **File** | `models/insurance_incentive_payout.py` (`write`, `_unlink_except_claimed`, `action_recompute`, `_move`) |
+| **Condition** | `state != 'computed'` and a field of `_EVALUATED_FIELDS` is written; or the payout is deleted; or Recompute is pressed. A status button pressed from the wrong status. |
+| **Errors** | _"A claimed or paid payout cannot be changed. ⏎ لا يمكن تعديل دفعة حافز تمت المطالبة بها أو دُفعت."_ / _"A claimed or paid payout cannot be deleted. ⏎ لا يمكن حذف دفعة حافز تمت المطالبة بها أو دُفعت."_ / _"Only a payout that is still computed can be recomputed. ⏎ لا يُعاد حساب دفعة الحافز إلا وهي في حالة «محسوبة»."_ / _"Only a payout that is %(from_state)s can become %(to_state)s. ⏎ فقط دفعة الحافز في حالة «%(from_state)s» يمكن أن تصبح «%(to_state)s»."_ |
+| **FR** | FR-BASE-013-07-03, FR-BASE-013-07-04, BR-BASE-010-04-02 |
+| **Purpose** | What was claimed from the insurer stays what the record shows. |
+
+### C-173 — A figure an incentive or a formula figure uses cannot change
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.incentive.figure` |
+| **File** | `models/insurance_incentive_figure.py` (`write`, `is_locked`, `user_figure_ids`); `views/insurance_incentive_figure_views.xml` (`readonly="is_locked"` on every definition field, warning banner; view part: C-175) |
+| **Condition** | any incentive picks the figure, or any formula figure uses it (read as superuser); every write is refused (picking happens on the incentive, D-130) |
+| **Error** | _"This figure is in use: duplicate it to change it. ⏎ هذا المؤشر مستخدم: انسخه لتعديله."_ |
+| **FR** | FR-BASE-009-05-20, FR-BASE-009-05-24, D-122 |
+
+### C-196 — Only the system writes the حفظة التوريد
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.policy`, `insurance.policy.endorsement` (through `insurance.commission.mixin`) |
+| **File** | `models/mixins/insurance_commission_mixin.py` |
+| **Mechanism** | `create()`/`write()` of `insurance.commission.mixin` → `_check_premium_schedule_write(vals)` (D-190) |
+| **Condition** | a key of `PREMIUM_SCHEDULE_FIELDS` (`premium_schedule_document`, `premium_schedule_document_filename`, `premium_schedule_reference_number`) without both `env.su` and ctx `_premium_schedule_attach` (D-172, D-187). The context alone is not enough: an RPC client can send any context but cannot get superuser mode. Example: customer service writing an endorsement's reference → refused; the sysadmin writing the policy's receipt → refused. |
+| **Error** | _"Use «Attach Premium Instalment Schedule» to change the حفظة التوريد. ⏎ استخدم «إرفاق حفظة التوريد» لتغيير حفظة التوريد."_ |
+| **FR** | FR-BASE-006-08-07 |
+| **Tests** | `TestPremiumSchedule.test_02` |
+
+### C-207 — An expired or cancelled policy is read-only
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.policy` |
+| **File** | `models/insurance_policy.py` (`write`, `_TERMINAL_STATES`, `_TERMINAL_SAFE_FIELDS`) |
+| **Condition** | any write on a policy in `expired` / `cancelled` except `_TERMINAL_SAFE_FIELDS` (the chatter and activity fields). Stored-compute flushes are caught too. |
+| **Error** | _"Cannot modify policy '%(name)s': it is %(state)s. Contact an administrator if changes are required."_ |
+| **Amended** | the three `PREMIUM_SCHEDULE_FIELDS` are safe (D-163): the insurer's receipt often arrives after the policy expired. Example: POL-0031, expired last month → `TW-2026-090` attached. |
+| **FR** | FR-BASE-006-12-01 |
+| **Tests** | `TestPremiumSchedule.test_06` |
+
+### C-187 — Batch line snapshots are system-set
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.commission.batch.line` |
+| **File** | `models/insurance_commission_batch_line.py` (`create`/`write` → `_check_system_fields`, `_LINE_SYSTEM_FIELDS`; `create`/`write`/`unlink` → `_check_batch_editable` / `batch._check_lines_editable`, `_LINE_FROZEN_WHEN_SENT`) |
+| **Mechanism** | `create()`/`write()`/`unlink()` guards. The system fields pass only when `insurance.commission.batch._in_transition()` is true: `env.su` **and** ctx `_batch_transition` (D-186, D-187). The frozen-when-sent check has no bypass. |
+| **Condition** | (a) a key of `_LINE_SYSTEM_FIELDS` in `vals`: the snapshots (`installment_name`, `policy_id`, `endorsement_id`, `payment_date`, `paid_amount`, `premium_schedule_reference_number`, `expected_commission`, `expected_bonus`) the computes `expected_amount`, `difference`, and `batch_state` (D-211: a readonly related field has no inverse, so a hand write would only take the line out of the C-185 index). Example: the accountant writing `paid_amount = 1` or `batch_state = cancelled` → refused, also under a crafted `_batch_transition` context. (b) Once the batch is not draft: a line created on it, a line unlinked from it, or `installment_id` / `batch_id` (`_LINE_FROZEN_WHEN_SENT`) written on its line, to or from that batch. Example: CB/2026/0005 is sent → adding POL-0042 #2, removing a line or re-pointing it → refused until it is reset to draft. |
+| **Error** | (a) _"%(fields)s on a commission batch line are set by the system. ⏎ %(fields)s في سطر دفعة العمولة يحددها النظام."_ (b) _"Batch %(batch)s has been sent; reset it to draft first. ⏎ أُرسلت الدفعة %(batch)s؛ أعدها إلى مسودة أولاً."_ |
+| **FR** | FR-BASE-013-02-06 |
+| **Tests** | `TestCommissionBatchLines.test_05`; `TestCommissionBatch.test_18_sent_lines_are_frozen` |
+
+### C-194 — A batched installment keeps its payment
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.cheque`, `policy.payment.schedule` |
+| **File** | `models/insurance_cheque.py` (`write`, after C-140 `_check_cleared_lock`); `models/policy_payment_schedule.py` (`write` → `_check_payment_not_batched`, before C-142; message `_raise_payment_batched`) |
+| **Mechanism** | `write()` guards on both sides (D-178). Only the move out of Cleared and the row's `cheque_id` are checked, so the payment engine (C-138, C-153) is untouched. |
+| **Condition** | payment side: a `state` other than `cleared` written on a cleared payment one of whose rows has `is_commission_batched`; row side: any `cheque_id` in `vals` on a row with `is_commission_batched`. Example: bouncing CHQ 004512 of POL-0042 #1, or cash REC-0091 back to Received, while the rows are in CB/2026/0005 → refused. A cancelled batch releases them. A confirmed batch's payments can never bounce again: that is what confirmed means. |
+| **Error** | _"Payment %(payment)s pays installments in commission batch %(batch)s. Remove them from the batch or cancel it first. ⏎ الدفعة %(payment)s تسدد أقساطاً في دفعة العمولة %(batch)s. أزلها من الدفعة أو ألغِ الدفعة أولاً."_ |
+| **FR** | FR-BASE-013-06-14 |
+| **Tests** | `TestCommissionBatchLines.test_09`, `test_10`, `test_11` |
+
+### C-183 — A batched حفظة التوريد cannot change
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.policy`, `insurance.policy.endorsement` (through `insurance.commission.mixin`) |
+| **File** | `models/mixins/insurance_commission_mixin.py` (`_check_premium_schedule_write`, after C-196; hook `_premium_schedule_dependents`, overridden in `models/insurance_policy.py` and `models/insurance_policy_endorsement.py`) |
+| **Mechanism** | `create()`/`write()` of the mixin (D-190). Runs on the system path too: the attach wizard's sudo write is refused alike. |
+| **Condition** | a key of `PREMIUM_SCHEDULE_FIELDS` is written while any row of `record._premium_schedule_dependents()` has `is_commission_batched` (D-171). Policy: its rows whose `_premium_schedule_holder()` is the policy (its own and the endorsement rows that fall back to it). Endorsement: all its own rows, receipt or not. Example: END-0007 has no receipt, END-0007 #1 is in CB/2026/0005 under the policy's `TW-2026-118` → attaching `TW-2026-201` to END-0007 is refused. A cancelled batch releases it. |
+| **Error** | _"The Premium Instalment Schedule of %(record)s is used by commission batch %(batch)s and cannot be changed. ⏎ حفظة التوريد الخاصة بـ %(record)s مستخدمة في دفعة العمولة %(batch)s ولا يمكن تغييرها."_ |
+| **FR** | FR-BASE-006-08-08 |
+| **Tests** | `TestCommissionBatchLines.test_12`, `test_12b` (through the attach wizard, D-221), `test_13`, `test_14` |
+
+### C-195 — A batched policy's commission settings cannot change
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.policy` |
+| **File** | `models/insurance_policy.py` (`write`, after C-160; `_BATCH_LOCKED_COMMISSION_FIELDS`) |
+| **Mechanism** | `write()` guard on a module-level frozenset (D-182). No bypass, superuser included. |
+| **Condition** | `is_flat_commission`, `is_commission_exception` or `commission_rate` in `vals` while any row of `payment_schedule_ids` (endorsement rows included) has `is_commission_batched`. Example: POL-0042 #1 is in CB/2026/0005 → changing the rate to 12% or ticking flat is refused. A cancelled batch releases it. |
+| **Error** | _"The commission settings of policy %(policy)s are used by commission batch %(batch)s and cannot be changed. ⏎ إعدادات العمولة للوثيقة %(policy)s مستخدمة في دفعة العمولة %(batch)s ولا يمكن تغييرها."_ |
+| **FR** | FR-BASE-006-08-09 |
+| **Tests** | `TestCommissionBatchLines.test_15` |
+
+### C-186 — A batch's status changes only through its buttons
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.commission.batch` |
+| **File** | `models/insurance_commission_batch.py` (`create`, `write` → `_refuse_state_write`; the one writer is `_transition`) |
+| **Mechanism** | `write()` and `create()` guards; pass only when `_in_transition()` is true: `env.su` **and** ctx `_batch_transition` (D-187). `create()` also refuses a non-draft state (D-191). `state` is `copy=False`, so Duplicate starts as draft. |
+| **Condition** | `state` in `vals` outside `_transition()`. Example: the accountant writing `state = 'confirmed'`, also under a crafted `_batch_transition` context, or creating a batch with `state = 'confirmed'` → refused. |
+| **Error** | _"Use the batch buttons to change its status. ⏎ استخدم أزرار الدفعة لتغيير حالتها."_ |
+| **FR** | FR-BASE-013-02-05 |
+| **Tests** | `TestCommissionBatch.test_03_the_status_moves_only_through_the_buttons`, `test_11_a_duplicate_starts_as_draft` |
+
+### C-197 — What a batch was sent with stays fixed; confirmed amounts are typed while Sent or Confirmed
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.commission.batch`, `insurance.commission.batch.line` |
+| **File** | `models/insurance_commission_batch.py` (`write`, `_LOCKED_WHEN_SENT`); `models/insurance_commission_batch_line.py` (`create`/`write` → `_check_confirmed_amount_entry`, `_CONFIRMED_AMOUNT_STATES`) |
+| **Mechanism** | `write()` guards (D-180). Batch side: no bypass, the moves never write these fields. Line side: passes only when `_in_transition()` is true (`env.su` **and** ctx `_batch_transition`, D-187), which is the send pre-fill. |
+| **Condition** | batch: a key of `_LOCKED_WHEN_SENT` (`insurance_company_id`, `currency_id`, `date`) in `vals` on a batch that is not draft; line: `confirmed_amount` in `vals` (create or write) while the line's batch is neither Sent nor Confirmed (`_CONFIRMED_AMOUNT_STATES`), outside `_in_transition()` (D-229). Once the batch has an invoice, C-188 refuses the amount first. Example: CB/2026/0005 is sent → changing its insurer, currency or date is refused; typing 400 on a draft line is refused, also under a crafted `_batch_transition` context; typing 400 on POL-0042 #2 of the sent batch, or of the confirmed batch before Create Invoice, is accepted; in Confirmed the correction also meets the confirm checks again (C-189, D-239). |
+| **Error** | batch: _"%(fields)s can be changed only while the batch is draft. ⏎ %(fields)s لا يمكن تغييره إلا والدفعة مسودة."_; line: _"Confirmed amounts are entered while the batch is sent or confirmed. ⏎ تُدخل المبالغ المؤكدة أثناء حالة «مرسلة» أو «مؤكدة» للدفعة."_ |
+| **FR** | FR-BASE-013-02-06, FR-BASE-013-08-01, FR-BASE-013-08-05 |
+| **Tests** | `TestCommissionBatch.test_17_a_sent_batch_header_is_frozen`, `test_23b_confirmed_amounts_are_corrected_until_the_invoice`, `test_23h_a_correction_in_confirmed_meets_confirm_checks_again` |
+
+### C-208 — A batch's totals and dates are system-set
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.commission.batch` |
+| **File** | `models/insurance_commission_batch.py` (`write`, `_BATCH_SYSTEM_FIELDS`) |
+| **Mechanism** | `write()` guard (D-186); passes only when `_in_transition()` is true: `env.su` **and** ctx `_batch_transition` (D-187). The ORM stores the totals without `write()`. |
+| **Condition** | a key of `_BATCH_SYSTEM_FIELDS` in `vals`: the stored totals `total_paid_amount`, `total_expected_amount`, `total_confirmed_amount`, `total_difference`, `line_count`, and the move dates `sent_date`, `confirmed_date`; the commission invoice link `invoice_id`, written by Create Invoice only (it freezes the batch, C-188, D-232). Example: the accountant writing `line_count = 9`, `sent_date = today`, or `invoice_id` pointing at another move or cleared → refused. |
+| **Error** | _"%(fields)s is set by the system. ⏎ %(fields)s يحدده النظام."_ |
+| **FR** | FR-BASE-013-02-06, FR-BASE-013-08-01 |
+| **Tests** | `TestCommissionBatch.test_19_batch_system_fields_are_not_written_by_hand`, `test_23_a_confirmed_batch_is_locked` |
+
+### C-188 — A confirmed batch cannot be changed but for its confirmed amounts; an invoiced batch is read-only
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.commission.batch`, `insurance.commission.batch.line` |
+| **File** | `models/insurance_commission_batch.py` (`write` → `_check_not_invoiced`, `_CHATTER_FIELDS`, `_check_not_confirmed`, `_CONFIRMED_WRITABLE`); `models/insurance_commission_batch_line.py` (`write` → `batch_id._check_not_invoiced`, `batch_id._check_not_confirmed`, `_LINE_CONFIRMED_WRITABLE`) |
+| **Mechanism** | `write()` guards, the first check in each `write()`, before the C-186 / C-187 / C-197 / C-208 bypass is read. No bypass: superuser mode and ctx `_batch_transition` do not open them. The ORM stores recomputed totals without `write()`. No move leaves `confirmed` (C-200). |
+| **Condition** | **invoiced** (the batch has an `invoice_id`, D-229): batch: a key outside `_CHATTER_FIELDS` (`message_ids`, `message_follower_ids`, `message_partner_ids`, `activity_ids`) in `vals`, `invoice_id` included; line: any non-empty `vals`. **confirmed, no invoice:** batch: a key outside `_CONFIRMED_WRITABLE` (`_CHATTER_FIELDS` + `invoice_id` + `line_ids`); line: a key outside `_LINE_CONFIRMED_WRITABLE` (`confirmed_amount`). `line_ids` passes the batch guard because the form saves an inline edit through the batch (`web_save` → `line_ids: [Command.update(line, {'confirmed_amount': 400})]`, D-231); each command then meets the line guards: an update of the amount passes, any other key is refused here, and `Command.create` / `Command.delete` are refused by C-187. Line create and unlink are refused outside draft by C-187. A deleted draft commission invoice clears `invoice_id` (SQL set null), so the amounts open again. Example: CB/2026/0005 is confirmed → writing its note, or `paid_amount` on POL-0042 #1 as superuser with `_batch_transition`, is refused; POL-0042 #2 corrected from 440 to 400 is accepted (C-197, C-205 and the confirm checks of C-189 still apply, D-239); Create Invoice writing `invoice_id` is accepted; after it, 390 on POL-0042 #2, the note, a document reference or clearing the invoice link are refused, also as superuser with `_batch_transition`; a chatter post "Paid by the insurer on day 40" is accepted. |
+| **Error** | confirmed: _"Confirmed batch %(batch)s cannot be changed. ⏎ لا يمكن تغيير الدفعة المؤكدة %(batch)s."_; invoiced: _"Batch %(batch)s is invoiced and cannot be changed. ⏎ الدفعة %(batch)s صدرت لها فاتورة ولا يمكن تغييرها."_ |
+| **FR** | FR-BASE-013-08-05, FR-BASE-013-08-06 |
+| **Tests** | `TestCommissionBatch.test_23_a_confirmed_batch_is_locked`, `test_23b_confirmed_amounts_are_corrected_until_the_invoice`, `test_23c_an_invoiced_batch_is_read_only`, `test_23e_the_form_saves_a_corrected_amount_through_the_batch`, `test_23f_deleting_the_draft_invoice_opens_the_amounts`, `test_23g_a_correction_in_confirmed_is_noted_on_the_batch` (a correction in Confirmed is noted on the batch chatter, D-233) |
+
+### C-215 — A cancelled batch keeps only its chatter
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.commission.batch` |
+| **File** | `models/insurance_commission_batch.py` (`write` → `_check_not_cancelled`, `_CHATTER_FIELDS`) |
+| **Mechanism** | `write()` guard (F18, D-247). The system's own writes pass (superuser mode **and** ctx `_batch_transition`, `_in_transition()`, D-187), like C-186 / C-208; a context key alone or superuser mode alone does not open it. No move leaves `cancelled` (C-200), so no code path writes a cancelled batch today. The lines need no guard of their own: on a cancelled batch C-187 refuses `installment_id` / `batch_id`, a new line and a line delete, and C-197 refuses `confirmed_amount`. The form shows the note and the documents read-only (C-204). |
+| **Condition** | a key outside `_CHATTER_FIELDS` (`message_ids`, `message_follower_ids`, `message_partner_ids`, `activity_ids`) in `vals` on a batch whose `state` is `cancelled`, outside `_in_transition()`. Example: CB/2026/0003 is cancelled → its note "late edit", a company invoice reference or the insurer's documents are refused for the accountant, the sysadmin, superuser mode and the accountant with a crafted `_batch_transition`; a chatter post "Insurer closed the file" is accepted. |
+| **Error** | _"Cancelled batch %(batch)s cannot be changed. ⏎ لا يمكن تغيير الدفعة الملغاة %(batch)s."_ |
+| **FR** | FR-BASE-013-02-05 |
+| **Tests** | `TestCommissionBatch.test_04b_a_cancelled_batch_is_read_only` |
+
+### C-212 — A contract's Renewed From is fixed at creation
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.company.contract` |
+| **File** | `models/insurance_company_contract.py` (`write`, first lines) |
+| **Mechanism** | `write()` guard, a bare refusal of the key (like C-163); an immutability rule, so not `@api.constrains`. Renew sets the field through `copy()` defaults, a `create()` |
+| **Condition** | `renewed_from_id` is among the written keys, whatever its value. Example: re-pointing the 2032 contract to a 2036 contract, or clearing it → refused |
+| **Error** | _"A contract's Renewed From cannot be changed. Renew the old contract instead. ⏎ لا يمكن تغيير العقد الأصلي لعقد مجدد. جدد العقد القديم بدلاً من ذلك."_ |
+| **FR** | FR-BASE-009-04-13 |
+| **Tests** | `TestContractRenewal.test_06_renewed_from_is_fixed` |
 
 ---
 
@@ -204,7 +435,7 @@ This document catalogs all controls that prevent write, delete, or modification 
 | **Model** | `insurance.policy` |
 | **File** | `models/insurance_policy.py` (line ~452) |
 | **Constrains** | `is_commission_exception`, `commission_rate`, `contract_id` |
-| **Errors** | _"For manual commission policies, you must specify a commission rate greater than 0."_ / _"No active contract found for company '%s' on date %s."_ |
+| **Errors** | _"For manual commission policies, you must specify a commission rate greater than 0."_ / _"No contract found for company '%s' on start date %s."_ |
 
 ### C-08 — Policy payment schedule must equal gross premium
 
@@ -569,14 +800,16 @@ This pattern is replicated across all type-specific junction tables:
 
 ---
 
-### C-134 — Commission batch accepts only policies with a commission
+### C-134 — Commission batch accepts only policies with a commission (Retired → C-184)
+
+**Retired → C-184** (commission-batch-receipts plan, Task 18). The batch no longer has `policy_ids`; it is a list of installment lines, and C-184 refuses a line whose installment earns no commission. Kept for the record:
 
 | Attribute | Value |
 |-----------|-------|
 | **Module** | `optimum_insurance_base` |
 | **Model** | `insurance.commission.batch` |
-| **File** | `models/insurance_commission_batch.py` |
-| **Constrains** | `policy_ids` |
+| **File** | `models/insurance_commission_batch.py` (removed: `_check_policies_have_commission`) |
+| **Constrains** | `policy_ids` (field removed) |
 | **Condition** | Any batched policy has `commission_amount <= 0` (checked as superuser: the field is accountant-only, C-136, and the sysadmin also runs batches; this replaced the former `policy_ids` domain clause) |
 | **Error** | _"These policies have no commission and cannot be batched: %s"_ |
 | **FR** | FR-BASE-013-02-02 |
@@ -625,11 +858,278 @@ This pattern is replicated across all type-specific junction tables:
 |-----------|-------|
 | **Module** | `optimum_insurance_base` |
 | **Model** | `insurance.cheque` |
-| **File** | `models/insurance_cheque.py` (`_check_cheque_document`) |
-| **Constrains** | `cheque_document`, `cheque_document_filename` |
+| **File** | `models/insurance_cheque.py` (`_check_method_fields`, was `_check_cheque_document`) |
+| **Mechanism** | `@api.constrains`, shared with C-191. Files are read as their sizes through `with_file_sizes()` (`tools/document_checks.py`), never loaded (R6, D-245). |
+| **Constrains** | `payment_method`, `cheque_document`, `cheque_document_filename` (and the transfer fields, C-191) |
 | **Condition** | `cheque_document` is not set, or `cheque_document_filename` does not end with `.pdf`, `.png`, `.jpg` or `.jpeg` (case-insensitive); enforced through `default=False`, which puts the field in every create's values — `required=True` alone is a client hint for attachment binaries |
 | **Error** | _"Cheque %s needs a scan of the physical cheque."_ / _"The scan of cheque %s must be a PDF or an image (.pdf, .png, .jpg, .jpeg)."_ |
 | **FR** | FR-BASE-013-06-09 |
+| **Extended by** | C-191 (cheques only since FR-BASE-013-06-10) |
+
+### C-159 — An endorsement's installments have the sign of its direction
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.policy.endorsement` |
+| **File** | `models/insurance_policy_endorsement.py` (`_check_settlement_shape`, run by the `_check_settlement` constraint and by `_validate_settlement()` at apply / schedule) |
+| **Constrains** | `settlement_direction`, `net_premium`, `gross_premium`, `change_line_ids` (the constraint also fires when a change line is created for the endorsement) |
+| **Condition** | An installment change line (`_cheque_lines()`) whose `after_values['amount']` is negative on an increase, or positive on a decrease |
+| **Error** | _"Endorsement %(number)s is a premium increase and can carry only positive installments; %(amount)s due %(date)s is not one."_ / _"Endorsement %(number)s is a premium decrease and can carry only refund (negative) installments; %(amount)s due %(date)s is not one."_ |
+| **FR** | FR-BASE-007-08-13 |
+| **Purpose** | D-074 (increase side), extended by the user to the decrease side on 2026-10-03. A refund row inside an increase would earn a negative bonus (net amount × tier %, FR-BASE-006-11-14); a positive row inside a decrease would be money collected on a record that earns nothing (FR-BASE-007-09-04). |
+
+### C-157 — A covered installment's net amount never moves
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `policy.payment.schedule` |
+| **File** | `models/policy_payment_schedule.py` |
+| **Method** | `_check_covered_net_amount()` |
+| **Constrains** | `net_amount` |
+| **Condition** | A `net_amount` is written on an installment that has a `cheque_id` (any cheque state). Only the system writes a net amount (C-143), and `_assign_installment_net_amounts()` writes only the rows whose net amount changes, so this is exactly: a create, delete, amount or due-date change on any installment of an owner would change the net amount of a covered installment of that owner. No bypass; the system's own superuser write is refused too. |
+| **Error** | _"%(line)s is covered by cheque %(cheque)s. This change would move the administrative fees of %(owner)s onto or off it. Remove it from the cheque first."_ |
+| **FR** | FR-BASE-006-11-23, FR-BASE-013-06-06 |
+| **Purpose** | D-066 applied to the one figure another row's edit can move: a covered installment cannot be modified, and its net amount is the basis of its bonus. Without it, moving an uncovered installment before a cleared first one would silently change a paid bonus (D-069 A3). A constraint on the installment since D-085 (it used to be a check inside the assigner). |
+
+### C-162 — An incentive's period settings match how it is evaluated
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.incentive` |
+| **File** | `models/insurance_incentive.py` (`_check_period_settings`) |
+| **Constrains** | `evaluation`, `period_type`, `period_months` |
+| **Errors** | _"An incentive evaluated every period needs a period type. ⏎ الحافز الذي يُقيَّم كل فترة يحتاج إلى نوع فترة."_ / _"An incentive evaluated at contract end has no period type. ⏎ الحافز الذي يُقيَّم في نهاية العقد ليس له نوع فترة."_ / _"'Every N months' needs a number of months above zero. ⏎ «كل N شهر» يحتاج إلى عدد شهور أكبر من صفر."_ / _"The number of months is used only with 'Every N months'. ⏎ عدد الشهور يُستخدم فقط مع «كل N شهر»."_ |
+| **FR** | FR-BASE-009-05-02, BR-BASE-010-03-01 |
+
+### C-164 — A figure's fields match its kind; a record figure is a well-formed sum or count
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.incentive.figure` |
+| **File** | `models/insurance_incentive_figure.py` (`_check_kind`, `_check_sum_field`, `_unique_code`) |
+| **Constrains** | `kind`, `source`, `aggregate`, `sum_field`, `insurance_type_ids`, `formula` |
+| **SQL** | `UNIQUE(code)` |
+| **Errors** | _"A figure code is used once in the library. ⏎ رمز المؤشر يُستخدم مرة واحدة في مكتبة المؤشرات."_ / _"Figure %(code)s needs a field to sum. ⏎ المؤشر %(code)s يحتاج إلى حقل للجمع."_ / _"Figure %(code)s counts records, so it has no field to sum. ⏎ المؤشر %(code)s يعدّ السجلات، فليس له حقل للجمع."_ / _"Figure %(code)s cannot sum '%(field)s': it is not a field of its source. ⏎ لا يمكن للمؤشر %(code)s جمع '%(field)s': ليس حقلاً من مصدره."_ / _"Figure %(code)s reads records, so it has no formula. ⏎ المؤشر %(code)s يقرأ السجلات، فليس له معادلة."_ / _"Figure %(code)s needs a source and an operation. ⏎ المؤشر %(code)s يحتاج إلى مصدر وعملية."_ / _"Figure %(code)s is a formula, so it has no source, operation, field to sum or types. ⏎ المؤشر %(code)s معادلة، فليس له مصدر أو عملية أو حقل للجمع أو أنواع."_ |
+| **FR** | FR-BASE-009-05-03, BR-BASE-010-03-03, FR-BASE-009-05-21, FR-BASE-009-05-19, FR-BASE-009-05-24 |
+
+### C-177 — A formula figure's formula is well formed and names library figures
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.incentive.figure` |
+| **File** | `models/insurance_incentive_figure.py` (`_check_formula`) |
+| **Constrains** | `kind`, `formula` |
+| **Errors** | _"Figure %(code)s is a formula: write its formula. ⏎ المؤشر %(code)s معادلة: اكتب معادلته."_ / _"Figure %(code)s: %(error)s ⏎ المؤشر %(code)s: %(error_ar)s"_ |
+| **FR** | FR-BASE-009-05-24, D-138 |
+
+### C-178 — A formula figure never contains itself
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.incentive.figure` |
+| **File** | `models/insurance_incentive_figure.py` (`_check_not_contains_itself`, `_contains`, `write`) |
+| **Constrains** | `formula` |
+| **Errors** | _"Figure %(code)s cannot use itself. ⏎ لا يمكن للمؤشر %(code)s أن يستخدم نفسه."_ / _"Figure %(code)s cannot use %(part)s: %(part)s contains %(code)s. ⏎ لا يمكن للمؤشر %(code)s استخدام %(part)s: المؤشر %(part)s يحتوي على %(code)s."_ |
+| **Note** | The figure `write()` also refuses `component_ids` and `user_figure_ids` (D-140): the figures a formula uses are read from its formula. |
+| **FR** | FR-BASE-009-05-24, D-138 |
+
+### C-165 — An incentive's formulas are well formed and use its own figures
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.incentive`; `insurance.incentive.figure` |
+| **File** | `models/insurance_incentive.py` (`_check_formulas`); `models/insurance_incentive_figure.py` (`write`) |
+| **Constrains** | `condition_formula`, `payout_formula`, `figure_ids`; the figure's `write()` refuses `incentive_ids` (D-130) |
+| **Errors** | _"%(incentive)s — %(formula)s: %(error)s ⏎ %(incentive)s — %(formula_ar)s: %(error_ar)s"_ (the error is the formula error, e.g. "Unknown figure Z."; every formula error is English then Arabic, FR-BASE-009-05-11; an emptied group is refused with "A group needs at least one condition.", the same message as before, FR-BASE-009-05-13; e.g. _"Choose a figure or a number for every empty value. ⏎ اختر مؤشراً أو رقماً لكل قيمة فارغة."_) / (raised when a write takes the figure out of the incentive; checked before the formula errors) _"Figure %(code)s is used by a formula of '%(incentive)s'. Take it out of the formula first. ⏎ المؤشر %(code)s مستخدم في معادلة الحافز '%(incentive)s'. أزله من المعادلة أولاً."_ / _"Pick figures from the incentive. ⏎ اختر المؤشرات من الحافز."_ (D-130: the figure's `write()` refuses `incentive_ids`) |
+| **FR** | FR-BASE-009-05-05, FR-BASE-009-05-06, FR-BASE-009-05-12, FR-BASE-009-05-13, BR-BASE-010-03-04, FR-BASE-009-05-19 |
+
+### C-179 — A flat commission type has no early-payment tiers on its contract
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.company.contract` |
+| **File** | `models/insurance_company_contract.py` |
+| **Mechanism** | `_check_flat_declarations()` from `@api.constrains('commission_line_ids', 'early_payment_reward_ids')` (`_check_flat_declarations_on_save`). It runs once, after every line and tier command of a contract save (D-182). Known limit, as C-180: a line or tier written directly (import, RPC) is not checked (D-253). |
+| **Condition** | a type declared flat on the contract has a reward row on the same contract. **In practice:** declare a type flat before any policy earns on it; an earned tier cannot be deleted (C-158). |
+| **Error** | _"Insurance type %(type)s is a flat commission (عموله مقتوعه) on this contract and cannot have early-payment rewards. ⏎ نوع التأمين %(type)s عمولته مقتوعة في هذا العقد ولا يجوز أن تكون له مكافآت سداد مبكر."_ |
+| **FR** | FR-BASE-009-04-12, BR-BASE-010-02-05 |
+| **Tests** | `TestContractFlatCommission.test_07`, `test_08`, `test_11`–`test_13` |
+
+---
+
+### C-180 — Every non-flat commission type has early-payment tiers
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.company.contract` |
+| **File** | `models/insurance_company_contract.py` |
+| **Constrains** | `commission_line_ids`, `early_payment_reward_ids` (`_check_early_payment_coverage`) |
+| **Condition** | a **non-flat** commission line type has no early-payment reward row. A flat line (`is_flat_commission`, «عموله مقتوعه») is exempt. Known limit (unchanged): a direct child write skips it. |
+| **Error** | the existing _"The following insurance types have commission lines but no early payment reward entries…"_ |
+| **FR** | FR-BASE-009-04-08, BR-BASE-010-01-05, FR-BASE-009-04-11 |
+| **Tests** | `TestContractFlatCommission.test_03`, `test_04` |
+
+---
+
+### C-181 — A non-manual flat policy needs its contract's flat declaration
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.policy` (part (a)); `insurance.company.contract` (part (b)) |
+| **File** | (a) `models/insurance_policy.py` (`_check_flat_commission_declared`); (b) `models/insurance_company_contract.py` (`_check_flat_declarations`, run by the contract constraint, as C-179) |
+| **Constrains** | (a) `is_flat_commission`, `is_commission_exception`, `contract_id`, `offer_id` (the policy's `insurance_type_id` is related to the offer, so the offer is the trigger). Read as superuser: the fields are accountant-only (C-136). (b) the contract's `commission_line_ids` (a line written or deleted directly is not checked, D-253); its policy search runs as `sudo()` (D-184). |
+| **Condition** | (a) a flat policy (`is_flat_commission`, «عموله مقتوعه») that is not manual (`is_commission_exception = False`) whose contract is missing or does not declare its insurance type flat (`_is_flat_commission_for`). A manual flat policy is accepted on any contract. (b) a contract line stops being flat (unticked or deleted) while a non-manual flat policy of that contract and type exists. Example: Motor unticked while POL-0050 (Motor, flat, not manual) uses the contract → refused. |
+| **Error** | (a) _"Policy %(policy)s is a flat commission but its contract does not declare %(type)s as flat. Make the commission manual or declare the type flat on the contract. ⏎ الوثيقة %(policy)s عمولتها مقتوعة لكن عقدها لا يحدد %(type)s كعمولة مقتوعة. اجعل العمولة يدوية أو حدد النوع كعمولة مقتوعة في العقد."_ (b) _"Insurance type %(type)s cannot stop being flat on this contract: flat policies %(policies)s use it. ⏎ لا يمكن إلغاء العمولة المقتوعة لنوع التأمين %(type)s في هذا العقد: الوثائق المقتوعة %(policies)s تستخدمه."_ |
+| **FR** | FR-BASE-006-08-06 |
+| **Tests** | (a) `TestFlatCommissionPolicy.test_01`–`test_03`; (b) `TestContractFlatCommission.test_15`–`test_17` |
+
+---
+
+### C-182 — A حفظة التوريد is a PDF with its reference, on a record that has installments
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.policy`, `insurance.policy.endorsement` (through `insurance.commission.mixin`) |
+| **File** | `models/mixins/insurance_commission_mixin.py` (`_check_premium_schedule`) |
+| **Constrains** | `premium_schedule_document`, `premium_schedule_document_filename`, `premium_schedule_reference_number` |
+| **Mechanism** | `check_pdf_pair` in `tools/document_checks.py` (shared with the batch documents), then the own-installments check. Files are read as their sizes through `with_file_sizes()` (`tools/document_checks.py`), never loaded (R6, D-245). |
+| **Condition** | document xor reference; filename not `.pdf` (any case: `TW-118.PDF` is accepted, `tw.docx` refused); a receipt on a record with no own installments (D-173): a policy with no schedule, an endorsement not applied. |
+| **Error** | _"The Premium Instalment Schedule (حفظة التوريد) needs both a PDF and its reference number. ⏎ حفظة التوريد يحتاج إلى ملف PDF ورقمه المرجعي معاً."_ / _"The Premium Instalment Schedule (حفظة التوريد) must be a PDF. ⏎ حفظة التوريد يجب أن يكون ملف PDF."_ / _"The Premium Instalment Schedule (حفظة التوريد) can be attached only once the payment schedule exists. ⏎ لا يمكن إرفاق حفظة التوريد إلا بعد إنشاء جدول السداد."_ |
+| **FR** | FR-BASE-006-08-07 |
+| **Tests** | `TestPremiumSchedule.test_03`–`test_05` |
+
+---
+
+### C-191 — A payment record carries its method's fields, and only those
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.cheque` |
+| **File** | `models/insurance_cheque.py` (`_check_method_fields`; constant `PROOF_METHODS`) |
+| **Constrains** | `payment_method`, `cheque_document`, `cheque_document_filename` |
+| **Mechanism** | `@api.constrains`. Files are read as their sizes through `with_file_sizes()` (`tools/document_checks.py`), never loaded (R6, D-245). |
+| **Condition** | a cheque or a bank transfer has no payment proof (`cheque_document`: the cheque's scan or the transfer's photo), or its proof is not a PDF or an image, or cash carries one; runs again when the method changes (D-175, D-254). Example: cash REC-0091 with a cheque scan → refused. |
+| **Error** | _"Cash payment %(name)s cannot carry a payment proof. ⏎ الدفعة النقدية %(name)s لا يجوز أن تحمل إثبات سداد."_ / _"Cheque %s needs a scan of the physical cheque."_ / _"Bank transfer %(name)s needs a photo of the transfer. ⏎ التحويل البنكي %(name)s يحتاج صورة التحويل."_ / _"The payment proof of %(name)s must be a PDF or an image (.pdf, .png, .jpg, .jpeg). ⏎ إثبات السداد للدفعة %(name)s يجب أن يكون PDF أو صورة (.pdf, .png, .jpg, .jpeg)."_ |
+| **FR** | FR-BASE-013-06-11 |
+| **Tests** | `TestPaymentMethods.test_02`–`test_04`, `test_06` |
+
+---
+
+### C-192 — Only a cheque is deposited or bounced
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.cheque` |
+| **File** | `models/insurance_cheque.py` (`_check_cheque_only_states`; constant `CHEQUE_ONLY_STATES`) |
+| **Constrains** | `payment_method`, `state` |
+| **Condition** | a state in `CHEQUE_ONLY_STATES` (`deposited`, `bounced`) with `payment_method != 'cheque'`. Cash and bank transfers go Received → Cleared (D-175). Catches the Deposit/Bounce buttons, a direct state write, and switching a deposited or bounced cheque to another method. Example: cash REC-0091 → Deposit refused; Clear accepted. |
+| **Error** | _"Only a cheque can be deposited or bounced. ⏎ لا يمكن إيداع أو ارتداد إلا الشيك."_ |
+| **FR** | FR-BASE-013-06-12 |
+| **Tests** | `TestPaymentMethods.test_08` |
+
+---
+
+### C-193 — A cheque names its bank
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.cheque` |
+| **File** | `models/insurance_cheque.py` (`_check_cheque_bank`) |
+| **Constrains** | `payment_method`, `bank_id` |
+| **Condition** | `payment_method == 'cheque'` and no `bank_id`. A bank transfer may name its bank; cash does not use it (D-176). Replaces the former `required=True` on `bank_id` (the column is nullable now). |
+| **Error** | _"Cheque %(name)s needs its bank. ⏎ الشيك %(name)s يحتاج إلى البنك."_ |
+| **FR** | FR-BASE-013-06-13 |
+| **Tests** | `TestPaymentMethods.test_03` |
+
+---
+
+### C-202 — The attach wizard names exactly one record
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.premium.schedule.wizard` |
+| **File** | `wizards/insurance_premium_schedule_wizard.py` (`_check_one_record`) |
+| **Constrains** | `policy_id`, `endorsement_id`, `reference_number` (required, so the check also runs when neither record is given) |
+| **Condition** | neither a policy nor an endorsement, or both. Example: a wizard on policy 42 and endorsement 7 at once is refused. |
+| **Error** | _"Attach the receipt to one policy or one endorsement. ⏎ أرفق الحفظة بوثيقة واحدة أو بملحق واحد."_ |
+| **FR** | FR-BASE-006-08-07 |
+| **Tests** | `TestPremiumSchedule.test_08` |
+
+---
+
+### C-184 — Only an eligible installment goes in a batch
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.commission.batch.line` |
+| **File** | `models/insurance_commission_batch_line.py` (`_check_eligible`) |
+| **Constrains** | `installment_id`, `batch_id` |
+| **Mechanism** | `_eligibility_errors()` runs `_ineligibility_reason()` as superuser (commission and bonus are accountant-only, the sysadmin batches too); later re-run by send and confirm. Replaces C-134 (retired in plan Task 18, when the batch moved onto its lines). |
+| **Condition** | on a batch that is not cancelled, the line's installment: was deleted; belongs to another insurance company; is in another currency; is not paid; has no حفظة التوريد (read from `_premium_schedule_holder()`, never the stored flag, D-186); or earns no commission (slice + bonus is zero). A return (refund) installment is eligible (D-209, F2: the former "return installment" reason and the picker's `amount > 0` were removed). Example: POL-0042 #3, not paid → refused; a paid −450 refund (expected −45) → accepted. |
+| **Error** | _"These installments cannot be put in a commission batch: ⏎ لا يمكن إدراج هذه الأقساط في دفعة عمولة: ⏎ - <installment>: <reason>"_, one reason per line |
+| **FR** | FR-BASE-013-02-02 |
+| **Tests** | `TestCommissionBatchLines.test_03`, `test_03b_a_return_installment_is_batched`, `test_07` |
+
+---
+
+### C-201 — A backward or cancel move needs a reason
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.commission.batch.reason.wizard`, `insurance.commission.batch` |
+| **File** | `wizards/insurance_commission_batch_reason_wizard.py` (`reason`, `required=True`); `models/insurance_commission_batch.py` (`_transition`, `_REASON_MOVES`) |
+| **Mechanism** | required field (NOT NULL) on the wizard, plus the `_transition()` check for a blank reason; the reason is posted on the batch chatter (D-158) |
+| **Condition** | a move in `_REASON_MOVES` (sent → draft, draft → cancelled, sent → cancelled) with no reason or only spaces. Example: Cancel with reason `"  "` → refused; with "Insurer asked for a correction" → the chatter reads "Draft → Cancelled: Insurer asked for a correction". |
+| **Error** | _"Give a reason to move batch %(batch)s back or to cancel it. ⏎ اذكر سبب إرجاع الدفعة %(batch)s أو إلغائها."_; on the wizard, Odoo's missing required value error |
+| **FR** | FR-BASE-013-02-05 |
+| **Tests** | `TestCommissionBatch.test_04_cancel_needs_a_reason_and_is_final` |
+
+---
+
+### C-205 — The batch's documents are PDFs with their references; a confirmed amount keeps its line's sign
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.commission.batch`, `insurance.commission.batch.line` |
+| **File** | `models/insurance_commission_batch.py` (`_check_documents`); `models/insurance_commission_batch_line.py` (`_check_confirmed_amount`) |
+| **Constrains** | batch: `company_invoice`, `company_invoice_filename`, `company_invoice_reference`, `commission_receipt`, `commission_receipt_filename`, `commission_receipt_reference_number`; line: `confirmed_amount`, `paid_amount` |
+| **Mechanism** | `check_pdf_pair` in `tools/document_checks.py` (shared with C-182), once per document; a plain sign check on the line. Files are read as their sizes through `with_file_sizes()` (`tools/document_checks.py`), never loaded (R6, D-245). |
+| **Condition** | per document: file xor reference, or a filename not `.pdf` (any case). Example: `INV-2026-55.pdf` + `INV-2026-55` → accepted; reference `INV-1` without a file → refused; `inv.xlsx` → refused. Line (D-209): `confirmed_amount < 0` on an ordinary line (`paid_amount` 0 or more), or `confirmed_amount > 0` on a return line (`paid_amount` below 0); an insurer that refuses a line confirms 0 (D-180). Example: expected 390 → −1 refused; expected −45 → −30 accepted, +1 refused. |
+| **Error** | _"The company invoice needs both a PDF and its reference number. ⏎ فاتورة شركة التأمين يحتاج إلى ملف PDF ورقمه المرجعي معاً."_ / _"The commission receipt (حفظة العمولة) must be a PDF. ⏎ حفظة العمولة يجب أن يكون ملف PDF."_ (same two messages for each document) / _"A confirmed amount cannot be negative. ⏎ لا يجوز أن يكون المبلغ المؤكد سالباً."_ / _"A return installment's confirmed amount cannot be positive. ⏎ لا يجوز أن يكون المبلغ المؤكد لقسط مرتجع موجباً."_ |
+| **FR** | FR-BASE-013-08-03 |
+| **Tests** | `TestCommissionBatch.test_13_batch_documents_are_pdfs_with_references`, `TestCommissionBatch.test_13b_a_return_line_is_confirmed_at_zero_or_below`, `TestCommissionBatch.test_14_a_confirmed_amount_is_never_negative`, `test_23b_confirmed_amounts_are_corrected_until_the_invoice` (in Confirmed, D-229) |
+
+### C-210 — An endorsement is applied only with its document
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.policy.endorsement` |
+| **File** | `models/insurance_policy_endorsement.py` (`_check_applied_document`, `_check_document_attached`) |
+| **Constrains** | `is_applied`, `policy_document` |
+| **Mechanism** | `@api.constrains` on the endorsement; `_schedule_endorsement()` and `_do_apply_changes()` call the same `_check_document_attached()` after their other validations, so Apply and Schedule are refused before any change line runs. Files are read as their sizes through `with_file_sizes()` (`tools/document_checks.py`), never loaded (R6, D-245). |
+| **Condition** | the endorsement is applied (or being applied or scheduled) and `policy_document` (from `insurance.commission.mixin`, D-219) is empty. A draft may be saved without it; an applied endorsement may replace it, not remove it; a reverted one may drop it. Example: END-0007 with no PDF → Apply refused; with `END-0007.pdf` → applied |
+| **Error** | _"Endorsement %(name)s cannot be applied without its document. Upload the endorsement document in the Documents page first. ⏎ لا يمكن تطبيق الملحق %(name)s بدون مستنده. ارفع مستند الملحق في صفحة المستندات أولاً."_ |
+| **FR** | FR-BASE-007-08-14 |
+| **Tests** | `TestEndorsementDocument.test_02_applying_without_the_document_is_refused`, `test_03_scheduling_without_the_document_is_refused`, `test_05_an_applied_endorsement_keeps_its_document`, `test_06_a_reverted_endorsement_may_drop_its_document` |
 
 ---
 
@@ -859,6 +1359,19 @@ This pattern is replicated across all type-specific junction tables:
 | **SQL** | `UNIQUE(name)` |
 | **Error** | _"Estate type name must be unique!"_ |
 
+### C-185 — One active batch per installment
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.commission.batch.line` |
+| **File** | `models/insurance_commission_batch_line.py` (`_unique_live_installment`, `batch_state`) |
+| **SQL** | `models.UniqueIndex("(installment_id) WHERE batch_state != 'cancelled'")`, index `insurance_commission_batch_line_unique_live_installment`. `batch_state` is the stored related `batch_id.state`, system-set (C-187). Moved here from the Python constraints by F3 (D-211): the "already in commission batch" search in `_ineligibility_reason()` and the send lock `_lock_installments()` are gone. |
+| **Condition** | the installment is on another line of a batch that is not cancelled, this batch included. Postgres also refuses it across transactions: two batches saved at the same moment cannot both hold the row (the former "Known limit" is closed). Example: POL-0042 #1 in CB/2026/0001 (draft), added to a second batch → refused; once CB/2026/0001 is cancelled, or its line removed, it is accepted. `is_commission_batched` reads the same condition. |
+| **Error** | _"This installment is already in a commission batch that is not cancelled. ⏎ هذا القسط مدرج بالفعل في دفعة عمولة غير ملغاة."_ (an `IntegrityError` in Python; the RPC layer shows the message) |
+| **FR** | FR-BASE-013-02-03 |
+| **Tests** | `TestCommissionBatchLines.test_04`, `test_04b_a_sent_batch_holds_its_row` |
+
 ### 4b. CHECK Constraints
 
 ### C-49 — Contract early payment reward days must be positive
@@ -951,6 +1464,42 @@ This pattern is replicated across all type-specific junction tables:
 | **Error** | _"A cheque amount cannot be zero."_ |
 | **FR** | FR-BASE-013-06-01 — the amount is signed (a refund cheque is negative), so only zero is invalid |
 
+### C-161 — A request, an offer and a policy have at least one cheque
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.request`; `insurance.base.mixin`, and through it `insurance.offer` and `insurance.policy` |
+| **File** | `models/insurance_request.py`, `models/mixins/insurance_base_mixin.py` (`_check_number_of_cheques` on both) |
+| **SQL** | `CHECK(number_of_cheques >= 1)` |
+| **Error** | _"The number of cheques must be at least 1."_ (request) / _"The number of payment cheques must be at least 1."_ (offer, policy) |
+| **FR** | FR-BASE-004-05-03, FR-BASE-005-05-04, FR-BASE-006-02-05 |
+| **Purpose** | D-090. The number of cheques is the number of installments the accept-offer wizard builds (FR-BASE-006-11-01); zero or a negative number is not a payment plan. Both fields default to 1. A request saved before the rule can hold no number (NULL), which the check does not look at; an offer created for such a request keeps the default of 1 instead of copying 0. |
+
+### C-166 — One payout per incentive and period
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.incentive.payout` |
+| **File** | `models/insurance_incentive_payout.py` (`_unique_period`) |
+| **SQL** | `UNIQUE(incentive_id, period_start)` |
+| **Error** | _"An incentive has one payout per period. ⏎ للحافز دفعة واحدة لكل فترة."_ |
+| **FR** | FR-BASE-013-07-01, BR-BASE-010-04-01 |
+
+### C-211 — A contract is renewed once
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.company.contract` |
+| **File** | `models/insurance_company_contract.py` (`_unique_renewed_from`) |
+| **SQL** | `UNIQUE(renewed_from_id)` (NULLs do not clash, so contracts that renew nothing are free). No Python pre-check: the index is the rule (D-226); the Renew button hides once renewed (C-214) |
+| **Condition** | a second contract with the same `renewed_from_id`. Example: the 2031 contract already renewed as 2032 → a second Renew is refused; once the 2032 contract is deleted, Renew works again |
+| **Error** | _"This contract has already been renewed. ⏎ تم تجديد هذا العقد بالفعل."_ (an `IntegrityError` in Python; the RPC layer shows the message) |
+| **FR** | FR-BASE-009-04-13 |
+| **Tests** | `TestContractRenewal.test_05_a_contract_is_renewed_once` |
+
 ---
 
 ## 5. Foreign Key Restrictions (`ondelete='restrict'`)
@@ -977,6 +1526,10 @@ These prevent deletion of parent records when child records reference them.
 | **C-148** | `insurance.cheque` | `bank_id` | `res.bank` with cheques | `models/insurance_cheque.py` |
 | **C-148** | `insurance.cheque` | `client_id` | `client` with cheques | `models/insurance_cheque.py` |
 | **C-148** | `insurance.cheque` | `insurance_company_id` | `insurance.company` with cheques | `models/insurance_cheque.py` |
+| **C-158** | `policy.payment.schedule` | `bonus_tier_id` | `contract.early.payment.reward` (a contract's early payment tier, and so its contract, which cascades to it) that an installment earned its bonus on. D-030: the installment links the tier row instead of copying its numbers, so the row must outlive the link (FR-BASE-006-11-25, D-069 A8) | `models/policy_payment_schedule.py` |
+| **C-167** | `insurance.incentive.payout` | `incentive_id` | `insurance.incentive` with payouts. An incentive that has payouts cannot be deleted, nor can its contract (BR-BASE-010-03-05). | `models/insurance_incentive_payout.py` |
+| **C-176** | `insurance.incentive.figure` | `insurance_type_ids` (relation `incentive_figure_type_rel.type_id` → `insurance_type`) | `insurance.type` that a figure uses. Deleting it would silently drop it from the figure (a cascade), and a figure limited to that one type would then read every type, changing a locked figure's value (C-173). FR-BASE-009-05-03, D-133. | `models/insurance_incentive_figure.py` |
+| **C-213** | `insurance.company.contract` | `renewed_from_id` | `insurance.company.contract` that has a renewal. The renewal chain is an audit link (odoo-workflow-integrity); deleting the renewal itself is allowed and frees the old contract for a new Renew (FR-BASE-009-04-13, D-226). Test: `TestContractRenewal.test_07_a_renewed_contract_cannot_be_deleted` | `models/insurance_company_contract.py` |
 
 ### Medical Module (`optimum_insurance_medical`)
 
@@ -1231,6 +1784,91 @@ These prevent deletion of parent records when child records reference them.
 | **FR** | BR-BASE-003-02-06 |
 | **Purpose** | Each contact line becomes a `client.individual`, whose `gender` is required (NOT NULL). The line's own field stays optional because `default_get` auto-fills a contact from the lead without one; this guard turns the database error into a readable message. |
 
+### C-172 — Only an accountant loads real figure values into "Try with values"
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.incentive` |
+| **File** | `models/insurance_incentive.py` (`action_current_period_values`) |
+| **Condition** | The user is in neither `group_insurance_accountant` nor `base.group_system` |
+| **Error** | _"Only an accountant can load real figure values. ⏎ تحميل القيم الفعلية للمؤشرات متاح للمحاسب فقط."_ (AccessError) |
+| **FR** | FR-BASE-009-05-16 |
+| **Purpose** | Figure values are money figures; payouts are already accountant-only (C-169). `try_formulas` stays open: it reads no business data. |
+
+See C-168 (incentive payout).
+
+---
+
+### C-206 — Collection trips carry cheques only
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.cheque`, `insurance.collection.delivery` |
+| **File** | `models/insurance_cheque.py` (`_collection_is_paper`, `_collection_waiting`, `_collection_ensure_payment_letter_trip`, `write`), `models/collection_trip.py` (`_generate_cheque_handover_trips`, `_generate_payment_letter_trips`) |
+| **Mechanism** | predicate `_collection_is_paper` (`payment_method == 'cheque'`) used by `_collection_waiting` and the payment-letter hook; domain leaf `('payment_method', '=', 'cheque')` in the two cron searches; `write()` withdraws a record switched away from cheque from trips still draft/assigned and re-runs the trip hooks on a `payment_method` change (D-177) |
+| **Condition** | A cash or bank-transfer record never gets a handover or payment-letter trip, whether it was created that way or corrected later; its installments still count as having their payment, so the policy's cheques are handed over without it |
+| **Error** | — (silently not carried) |
+| **FR** | FR-COL-001-03-10 |
+| **Tests** | `TestGenerator.test_a_cash_payment_is_never_carried`, `TestGenerator.test_a_cash_row_counts_as_in_but_only_cheques_travel`, `TestGenerator.test_a_cheque_switched_to_cash_leaves_the_handover_still_to_leave`, `TestGenerator.test_a_handed_over_cheque_switched_to_cash_gets_no_letter`, `TestGenerator.test_a_cash_row_switched_to_cheque_joins_the_handover_at_once` |
+
+---
+
+### C-199 — Only a confirmed batch without an invoice is invoiced
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.commission.batch` |
+| **File** | `models/insurance_commission_batch.py` (`action_create_invoice`) |
+| **Condition** | `state != 'confirmed'` or `invoice_id` already set. Write access on the batch is checked first; the link is then written as the system (C-208, D-232). Example: Create Invoice on draft CB/2026/0005 → refused. Creating the invoice no longer changes the state. The invoice is created as the acting user, so Odoo's `account.move` ACL also applies: the accountant has Invoicing rights (implied); a sysadmin without them is refused, and nothing is linked (D-242). |
+| **Error** | _"Only a confirmed batch without an invoice can be invoiced. ⏎ لا يمكن إصدار فاتورة إلا لدفعة مؤكدة ليست لها فاتورة."_ |
+| **FR** | FR-BASE-013-08-06 |
+| **Tests** | `TestCommissionBatch.test_07_only_a_confirmed_batch_is_invoiced`, `test_07b_the_invoice_needs_invoicing_rights` |
+
+---
+
+### C-200 — The batch moves only along its diagram
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.commission.batch` |
+| **File** | `models/insurance_commission_batch.py` (`_check_transition`, called by `_transition` and first by `action_confirm`; `_MOVES`) |
+| **Condition** | the acting user has no write access on the batch (`check_access('write')`, checked before any sudo); or a (from, to) pair outside `_MOVES` = {draft → sent, sent → draft, sent → confirmed, draft → cancelled, sent → cancelled}. Cancelled is final; Confirmed goes nowhere. `action_confirm` checks this before the documents (C-189). Example: a read-only user (the QA agent) pressing Confirm on a sent batch → AccessError, the batch stays Sent; Reset to Draft on a draft batch, Cancel on a confirmed batch, cancelled → draft, or Confirm on a draft batch without documents → refused with the move message. |
+| **Error** | no write access: Odoo's AccessError; a move outside `_MOVES`: _"Batch %(batch)s cannot go from %(old)s to %(new)s. ⏎ لا يمكن نقل الدفعة %(batch)s من %(old)s إلى %(new)s."_ |
+| **FR** | FR-BASE-013-02-05, FR-BASE-013-08-04 |
+| **Tests** | `TestCommissionBatch.test_04_cancel_needs_a_reason_and_is_final`, `test_05_reset_to_draft_from_sent_only_and_warns`, `test_06_a_confirmed_batch_cannot_be_cancelled`, `test_22_a_draft_batch_cannot_be_confirmed`, `test_24_a_read_only_user_cannot_confirm` |
+
+---
+
+### C-189 — A batch is sent with eligible lines and confirmed with the insurer's documents; a correction in Confirmed meets the confirm checks again
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.commission.batch`, `insurance.commission.batch.line` |
+| **File** | `models/insurance_commission_batch.py` (send: `action_send` checks write access first (`check_access('write')`), then `_check_sendable`, before the composer opens and renders the PDF; `_action_mark_sent` calls `_check_sendable` again when the email is posted; confirm: `_check_confirmable`, called by `action_confirm`); `models/insurance_commission_batch_line.py` (correction: `@api.constrains('confirmed_amount')` `_check_confirmed_batch_still_confirmable` → the batch's `_check_confirmable`, F14, D-239) |
+| **Condition** | **send:** the acting user has no write access on the batch (Send only; a reader such as the QA agent never gets the composer); the batch has no line, or a line fails C-184 again (C-185 is the database's, D-211). A line that fails when the email is posted refuses the post: nothing is posted, the batch stays Draft. **confirm:** the company invoice or its reference is missing, the «حفظة العمولة» PDF or its reference is missing, or a line fails C-184 again. The access and state rules (only from Sent) are `_check_transition`'s (C-200) and run first. Only the references are read: C-205 allows a reference only with its PDF. **correction in Confirmed (D-239, supersedes D-234):** a line's `confirmed_amount` is written while its batch is `confirmed` (no invoice yet, C-188) and the batch fails the confirm checks above; one helper, `_check_confirmable`, serves both. Every writer, superuser and the form's `line_ids` commands included; Sent is not checked. Example: CB/2026/0005 sent without documents → Confirm lists both; with both attached and POL-0042 #2 accepted at 400 → Confirmed, 960 expected, 920 confirmed, difference −40; then POL-0042 #2 corrected 440 → 400 → accepted; the same with the «حفظة العمولة» reference emptied outside the ORM, or POL-0042 #1's installment gone → refused, 440 stays. |
+| **Error** | send: no write access: Odoo's AccessError; _"Batch %(batch)s has no installments to send. ⏎ الدفعة %(batch)s ليس بها أقساط لإرسالها."_; confirm: _"Batch %(batch)s cannot be confirmed yet. Missing: ⏎ لا يمكن تأكيد الدفعة %(batch)s بعد. الناقص: ⏎ - the company invoice and its reference / فاتورة شركة التأمين ورقمها ⏎ - the commission receipt (حفظة العمولة) and its reference / حفظة العمولة ورقمها"_ (only the missing items are listed); a line failing eligibility: the C-184 message; a correction in Confirmed: the same confirm messages |
+| **FR** | FR-BASE-013-08-01, FR-BASE-013-08-04, FR-BASE-013-08-05 |
+| **Tests** | `TestCommissionBatch.test_16_an_empty_batch_is_not_sent`, `test_28_send_refuses_an_empty_batch`, `test_36_a_refused_batch_posts_nothing`, `test_38_a_read_only_user_cannot_open_send`, `test_21_confirm_needs_both_documents`, `test_22_a_draft_batch_cannot_be_confirmed`, `test_23h_a_correction_in_confirmed_meets_confirm_checks_again` |
+
+---
+
+### C-209 — The statement email matches the batch it was prepared for, and is never scheduled
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.commission.batch`, `mail.compose.message` |
+| **File** | `models/insurance_commission_batch.py` (`_statement_signature`, stored by `action_send` in ctx `mark_batch_as_sent`; `_check_statement_unchanged`, called by `message_post` before the move); `wizards/mail_compose_message.py` (`_action_schedule_message`) |
+| **Condition** | The composer renders the statement PDF when it opens, not when it posts. With ctx `mark_batch_as_sent`: the batch is cancelled or confirmed; or it is draft and its date or its installments differ from the signature taken at Send; or the composer's Schedule is used. A batch already sent is left alone (D-159). Nothing is posted and the batch keeps its state. Example: Send on CB/2026/0005 with POL-0042 #1, then POL-0042 #2 added → the post is refused; CB/2026/0005 cancelled while the composer is open → refused; Schedule → refused. |
+| **Error** | changed: _"Batch %(batch)s changed since the statement was prepared. Press Send again. ⏎ تغيرت الدفعة %(batch)s بعد إعداد الكشف. اضغط إرسال مرة أخرى."_; cancelled / confirmed: _"Batch %(batch)s is %(state)s and cannot be sent. ⏎ الدفعة %(batch)s %(state)s ولا يمكن إرسالها."_; scheduled: _"A commission statement cannot be scheduled. Send it now. ⏎ لا يمكن جدولة كشف العمولة. أرسله الآن."_ |
+| **FR** | FR-BASE-013-08-01 |
+| **Tests** | `TestCommissionBatch.test_33_a_line_added_after_the_composer_opened_refuses_the_post`, `test_34_a_cancelled_batch_refuses_the_post`, `test_35_the_statement_cannot_be_scheduled` |
+
 ---
 
 ## 7. View Readonly Controls
@@ -1366,6 +2004,17 @@ These fields become readonly based on business state, preventing modification at
 | **Purpose** | A cleared cheque has paid its covered installments; the cheque's own data locks until it leaves cleared, and the installment's due date locks as soon as it is covered by a cheque, in any cheque state (C-142) — not only while cleared, while paid flag, payment date, cheque link, amount and installment number are always system-set. The Manage Payments list's Register Cheque button is accountant-only (`groups="optimum_insurance_base.group_insurance_accountant"`); its own refusals (empty selection, a covered installment, or a selection spanning two insurance companies, two currencies, or totalling zero) live in `action_register_cheque` (FR-BASE-013-06-05), not in the view |
 | **FR** | FR-BASE-013-06-04, FR-BASE-013-06-06, FR-BASE-006-11-21, FR-BASE-013-06-05 |
 
+### C-175 — Incentive figure form readonly when the figure is locked
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **View** | `views/insurance_incentive_figure_views.xml` |
+| **Condition** | `readonly="is_locked"` |
+| **Fields affected** | `code`, `name`, `kind`, `source`, `aggregate`, `sum_field`, `insurance_type_ids`, `formula` |
+| **Purpose** | A figure an incentive or a formula figure uses cannot change; its form is read-only (the kind and the formula too) and shows a warning banner (see C-173) |
+| **FR** | FR-BASE-009-05-20, FR-BASE-009-05-24 |
+
 ### 7b. Always-Readonly Fields (computed / reference / system-generated)
 
 These fields are always `readonly="1"` because they are computed, system-generated, or reference fields that should not be manually edited.
@@ -1391,7 +2040,7 @@ These fields are always `readonly="1"` because they are computed, system-generat
 
 | Fields | Purpose |
 |--------|---------|
-| `first_check_completed`, `early_payment_bonus` | Computed |
+| `first_check_completed` | Computed |
 | `predefined_description`, `is_mandatory` | Reference |
 | `sequence` (check #) | Auto-generated |
 | `contract_id` | System-determined |
@@ -1483,6 +2132,29 @@ These fields are always `readonly="1"` because they are computed, system-generat
 | `request_has_estate_views.xml` | Same + `insurance_request_id`, `client_id` | Derived from estate |
 | `client_insurable_estate_views.xml` | `name`, `is_insured` | Computed |
 
+### C-170 — Incentive payouts are created by the system and their evaluated fields are read-only
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **View** | `views/insurance_incentive_payout_views.xml` — `insurance.incentive.payout` form and list |
+| **Condition** | `create="0"` on the form and the list; `readonly="1"` on the fields below |
+| **Fields affected** | `incentive_id`, `period_start`, `period_end`, `evaluated_on`, `holds`, `is_undefined`, `amount`, `condition_text`, `payout_text` |
+| **Purpose** | A payout is created by the daily job and changed only by Recompute (FR-BASE-013-07-01, FR-BASE-013-07-03). |
+| **FR** | FR-BASE-013-07-01, FR-BASE-013-07-03 |
+
+### C-171 — Irreversible incentive actions ask for confirmation
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **View** | `views/insurance_incentive_payout_views.xml` — payout form, `action_claim` and `action_mark_paid` (`confirm=`) |
+| **View** | `static/src/views/incentive_formula_widget/` — "Remove condition" opens a `ConfirmationDialog` (`removeCondition`) |
+| **Condition** | The user presses Claim or Mark Paid, or "Remove condition" in the builder |
+| **Message** | _"Claiming freezes this payout's figures and amount. This cannot be undone. Claim it? ⏎ المطالبة تجمّد قيم مؤشرات دفعة الحافز هذه ومبلغها، ولا يمكن التراجع عن ذلك. هل تريد المطالبة بها؟"_ / _"Mark this payout as paid? This cannot be undone. ⏎ هل تريد تسجيل دفعة الحافز هذه كمدفوعة؟ لا يمكن التراجع عن ذلك."_ / _"The incentive will then pay every period. ⏎ سيُصرف الحافز عندها في كل فترة."_ (Remove condition) |
+| **FR** | FR-BASE-013-07-06; FR-BASE-009-05-13 (Remove condition) |
+| **Purpose** | Claiming freezes the figures (C-168); a mis-click must not freeze a wrong payout; marking paid is final (FR-BASE-013-07-04). |
+
 ### 7c. No-Create Relational Pickers (`options="{'no_create': True}"`)
 
 These Many2one pickers may only select records that already exist. Both the dropdown quick-create and the "Create and edit..." dialog are disabled.
@@ -1513,6 +2185,63 @@ These Many2one pickers may only select records that already exist. Both the drop
 | **Module** | `optimum_insurance_vehicle` |
 | **View** | `wizards/endorsement_change_line_wizard_views.xml` |
 | **Fields affected** | `target_vehicle_id` |
+
+---
+
+### 7d. Feature Screen Rules (`readonly` / `invisible` / `required`, one table per feature)
+
+One control lists every view rule of one feature's screens, row by row.
+
+### C-204 — Readonly and visibility rules of the batch-receipt screens
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Mechanism** | view `readonly` / `invisible` / `required` / `groups` |
+| **FR** | FR-BASE-006-08-06, FR-BASE-007-09-09, FR-BASE-013-06-10..-13, FR-BASE-013-02-05, FR-BASE-013-02-06, FR-BASE-013-08-01, FR-BASE-013-08-03, FR-BASE-013-08-04, FR-BASE-013-08-06 |
+| **Tests** | `TestFlatCommissionAccept.test_04_the_tier_preview_hides_while_flat`, `TestPaymentMethodForm.test_01`–`test_03`, `test_05`; the attach button's opener: `TestPremiumSchedule.test_09`; the attach wizard's current receipt, warning and lock: `TestPremiumSchedule.test_17`, `test_18`, `test_18b`, `test_20`; Send's server side: `TestCommissionBatch.test_28`–`test_39`; the batch form's line list, confirmed amount and note: `TestCommissionBatch.test_23d`; who gets the four move buttons: `TestCommissionBatch.test_04c` |
+
+| Rule | View | Field / button | Condition |
+|---|---|---|---|
+| The flat flag is set at acceptance and never edited (D-182) | `views/insurance_policy_views.xml` (Commission page, group `commission_type`) | `is_flat_commission` | `readonly="1"` |
+| The endorsement shows its policy's flag | `views/insurance_policy_endorsement_views.xml` (Commission page, group `commission_type`) | `is_flat_commission` | readonly by the related field (FR-BASE-007-09-09) |
+| A flat commission earns no early-payment bonus, so its tiers are not previewed | `wizards/accept_offer_wizard_views.xml` (group `early_payment_info`) | the tier preview `early_payment_reward_ids` | `invisible="not contract_id or is_flat_commission"` |
+| Only a cheque is deposited or bounced (C-192) | `views/insurance_cheque_views.xml` (payment form header) | buttons `action_deposit`, `action_bounce` | `invisible="state == '<that state>' or payment_method != 'cheque'"` |
+| The bank is unused for cash, required for a cheque, optional for a transfer (C-193, D-176) | `views/insurance_cheque_views.xml` (payment form, group `parties`) | `bank_id` | `invisible="payment_method == 'cash'"`, `required="payment_method == 'cheque'"` |
+| The payment proof (cheque scan or transfer photo) is required for a cheque and a transfer, hidden for cash (C-151, C-191, D-175, D-254) | `views/insurance_cheque_views.xml` (payment form, group `money`) | `cheque_document` | `invisible="payment_method == 'cash'"`, `required="payment_method != 'cash'"` |
+| The method is locked once cleared (C-140) | `views/insurance_cheque_views.xml` (payment form, group `parties`) | `payment_method` | `readonly="state == 'cleared'"` |
+| A receipt goes only on a policy with its own installments (C-182) | `views/insurance_policy_views.xml` (Documents page, group `premium_schedule`, D-215) | button `action_attach_premium_schedule` | `invisible="not payment_schedule_ids"`; `groups` accountant, sysadmin |
+| An endorsement's receipt waits until it is applied (C-182, D-173) | `views/insurance_policy_endorsement_views.xml` (Documents page, group `premium_schedule`, D-217) | button `action_attach_premium_schedule` | `invisible="not is_applied or not installment_ids"`; `groups` accountant, sysadmin |
+| Only the attach wizard writes the receipt (C-196) | `views/insurance_policy_views.xml` (Documents page, group `premium_schedule`, D-215), `views/insurance_policy_endorsement_views.xml` (Documents page, group `premium_schedule`, D-217) | `premium_schedule_document`, `premium_schedule_reference_number` | `readonly="1"` |
+| The attach wizard shows the record's current receipt before replacing it, never as an input: file name, reference and a Download link to the record's own PDF (D-221, D-223) | `wizards/insurance_premium_schedule_wizard_views.xml` (group `current_receipt`) | `current_filename`, `current_reference_number`, `current_document_url` (`widget="url"`) | `readonly="1"`; the group `invisible="not current_reference_number"` |
+| The attach wizard warns that attaching replaces the current receipt (D-221) | `wizards/insurance_premium_schedule_wizard_views.xml` | the `alert-warning` "Attaching replaces it" | `invisible="not current_reference_number or is_current_locked"` |
+| A receipt a live batch uses is shown as locked and Attach is hidden; C-183 stays the enforcement (D-223) | `wizards/insurance_premium_schedule_wizard_views.xml` | the `alert-danger` "… cannot be changed"; button `action_attach` | the alert `invisible="not is_current_locked"`; the button `invisible="is_current_locked"` |
+| A batch's header changes only while draft (C-197) | `views/insurance_commission_batch_views.xml` (form sheet) | `date`, `insurance_company_id`, `currency_id` | `readonly="state != 'draft'"` |
+| A batch's lines are added, removed or re-pointed only while draft (C-187) | `views/insurance_commission_batch_views.xml` (form sheet, page `installments`) | `line_ids`; its `installment_id` column | `line_ids` `readonly="state == 'cancelled' or invoice_id"` (D-229), `options="{'create': [('state', '=', 'draft')], 'delete': [('state', '=', 'draft')]}"`; `installment_id` `readonly="parent.state != 'draft'"` |
+| Confirmed amounts are typed while sent or confirmed, until the invoice (C-197, C-188, D-229) | `views/insurance_commission_batch_views.xml` (page `installments`, line list) | `confirmed_amount` | `readonly="parent.state not in ('sent', 'confirmed') or parent.invoice_id"` |
+| A confirmed or cancelled batch's note is final (C-188, D-229; C-215, D-247) | `views/insurance_commission_batch_views.xml` (page `notes`) | `note` | `readonly="state in ('confirmed', 'cancelled')"` |
+| The move dates are shown, never edited (C-208) | `views/insurance_commission_batch_views.xml` (form sheet, right group) | `sent_date`, `confirmed_date` | `readonly="1"`, `invisible="not <field>"` |
+| Send only from Draft; the batch becomes Sent when the email is posted (C-189, D-159, D-201) | `views/insurance_commission_batch_views.xml` (form header, first button) | button `action_send` | `invisible="state != 'draft'"`; `groups` accountant, sysadmin |
+| Confirm only from Sent (C-189, C-200) | `views/insurance_commission_batch_views.xml` (form header) | button `action_confirm` | `invisible="state != 'sent'"`, `groups="optimum_insurance_base.group_insurance_accountant,base.group_system"` |
+| Reset to Draft only from Sent (C-200); accountant and sysadmin only, like Send and Confirm (F18, D-248) | `views/insurance_commission_batch_views.xml` (form header) | button `action_reset_to_draft` | `invisible="state != 'sent'"`, `groups="optimum_insurance_base.group_insurance_accountant,base.group_system"` |
+| Cancel only from Draft or Sent (C-200); accountant and sysadmin only, like Send and Confirm (F18, D-248) | `views/insurance_commission_batch_views.xml` (form header) | button `action_cancel` | `invisible="state not in ('draft', 'sent')"`, `groups="optimum_insurance_base.group_insurance_accountant,base.group_system"` |
+| Create Invoice only once, from Confirmed (C-199) | `views/insurance_commission_batch_views.xml` (form header) | button `action_create_invoice` | `invisible="state != 'confirmed' or invoice_id"` |
+| The insurer's documents are frozen once the batch is confirmed or cancelled (C-205) | `views/insurance_commission_batch_views.xml` (form sheet, page `documents`) | `company_invoice`, `company_invoice_reference`, `commission_receipt`, `commission_receipt_reference_number` | `readonly="state in ('confirmed', 'cancelled')"` |
+| The reason wizard's warning shows only on Reset to Draft (D-180) | `wizards/insurance_commission_batch_reason_wizard_views.xml` | the `warning` alert | `invisible="action != 'draft'"` |
+
+### C-214 — Readonly and visibility rules of contract renewal
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Mechanism** | view `readonly` / `invisible` / `groups` |
+| **FR** | FR-BASE-009-04-13 |
+| **Tests** | `TestContractRenewal.test_10_the_form_shows_renew_until_renewed` |
+
+| Rule | View | Field / button | Condition |
+|---|---|---|---|
+| Renew once, accountant and sysadmin only (C-211, D-225); a confirm dialog first | `views/insurance_company_contract_views.xml` (form header) | button `action_renew` | `invisible="renewal_id"`, `groups="optimum_insurance_base.group_insurance_accountant,base.group_system"` |
+| The renewal chain is shown, never edited (C-212) | `views/insurance_company_contract_views.xml` (Contract Period group) | `renewed_from_id`, `renewal_id` | `readonly="1"`, `invisible="not <field>"` |
 
 ---
 
@@ -1662,11 +2391,44 @@ When a policy is generated from an accepted offer on an `insurance.request`, all
 | **Module** | `optimum_insurance_base` |
 | **Model** | `insurance.commission.mixin` (so `insurance.policy` and `insurance.policy.endorsement`), `insurance.policy` |
 | **File** | `models/mixins/insurance_commission_mixin.py`, `models/insurance_policy.py`, `views/insurance_policy_views.xml`, `views/insurance_policy_endorsement_views.xml` |
-| **Fields** | Mixin: `is_commission_exception`, `commission_rate`, `contract_id`, `commission_amount`, `early_payment_bonus`, `commission_bonus_basis`, `commission_bonus`, `total_commission_amount`. Policy roll-ups: `current_commission_amount`, `current_commission_bonus`, `current_total_commission_amount`. The endorsement's related contract/toggle/rate inherit the group from their policy target. |
-| **Mechanism** | `groups='optimum_insurance_base.group_insurance_accountant'` on the field; the ORM refuses any Python attribute read, `read()`, fetch, `write()`/`create()` and search domains on it for non-members. The policy form's Commission page and the endorsement form's Commission page carry the same `groups=` so non-accountants see no empty heading. System paths run as superuser: `_earn_early_payment_bonus` (sudo), the policy's stored `current_*` roll-ups (stored computes run as superuser), the accept-offer wizard (C-135), the batch's invoice lines and C-134. |
+| **Fields** | Mixin: `is_commission_exception`, `commission_rate`, `is_flat_commission` (FR-BASE-006-08-06, «عموله مقتوعه»), `contract_id`, `commission_amount`, `commission_bonus`, `total_commission_amount`. Policy roll-ups: `current_commission_amount`, `current_commission_bonus`, `current_total_commission_amount`. The endorsement's related contract/toggle/rate/flat flag inherit the group from their policy target. Installment (`policy.payment.schedule`): `commission_amount`, `bonus_tier_id`, `bonus_percentage`, `bonus_amount`. |
+| **Mechanism** | `groups='optimum_insurance_base.group_insurance_accountant'` on the field; the ORM refuses any Python attribute read, `read()`, fetch, `write()`/`create()` and search domains on it for non-members. The policy form's Commission page and the endorsement form's Commission page carry the same `groups=` so non-accountants see no empty heading. System paths run as superuser: the installment's and the owner's stored bonus computes (D-083), `_assign_installment_net_amounts` (sudo), the policy's stored `current_*` roll-ups (stored computes run as superuser), the accept-offer wizard (C-135) and the batch line's snapshots and eligibility check (C-184; the batch totals and invoice lines read the ungated snapshots). |
 | **Also** | Accountants hold read-only ACL on `insurance.policy`, `insurance.policy.endorsement` and `insurance.policy.endorsement.line` so the gated figures are reachable by someone. |
 | **Error** | Odoo's standard field access error (_"You do not have enough rights to access the fields ..."_) |
-| **FR** | FR-BASE-007-09-08 |
+| **FR** | FR-BASE-007-09-08, FR-BASE-006-11-25, FR-BASE-006-11-26, FR-BASE-020-08-05 |
+| **Tests** | `TestFlatCommissionPolicy.test_05` (the flat flag) |
+
+### C-169 — Incentive payouts are accountant-only
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.incentive`, `insurance.incentive.figure`, `insurance.company.contract` |
+| **File** | `models/insurance_incentive_figure.py` (`PAYOUT_GROUPS`), `models/insurance_incentive.py`, `models/insurance_company_contract.py` |
+| **Fields** | `insurance.incentive`: `payout_ids`, `payout_count`; `insurance.incentive.figure`: `current_value_text`; `insurance.company.contract`: `incentive_payout_count` |
+| **Mechanism** | `groups=PAYOUT_GROUPS` (`optimum_insurance_base.group_insurance_accountant`, `base.group_system`) on all four fields; the ORM refuses any read of them for non-members. The payout model itself (`insurance.incentive.payout`) has ACL rows for these two groups only. |
+| **Error** | Odoo's standard field access error (_"You do not have enough rights to access the fields ..."_) |
+| **FR** | FR-BASE-013-07-01, FR-BASE-009-05-18 |
+| **Purpose** | The pricing team leader reads incentives but not what they paid (FR-BASE-013-07-01). |
+
+### C-203 — The batch-receipt models are accountant and sysadmin only
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Mechanism** | ACL rows in `security/ir.model.access.csv`; no other group has a row, so the ORM refuses them every access |
+| **Error** | Odoo's standard access error (_"You are not allowed to create ..."_) |
+| **FR** | FR-BASE-006-08-07, FR-BASE-013-02-01, FR-BASE-013-02-05 |
+| **Tests** | `TestPremiumSchedule.test_07`, `test_10`; `TestAdminAccountingAccess.test_pricing_cannot_read_commission_batch_line`, `test_accountant_can_read_commission_batch_line`, `test_pricing_cannot_create_commission_batch_reason_wizard`, `test_accountant_can_create_commission_batch_reason_wizard` |
+
+| Model | Group | Read | Write | Create | Delete |
+|---|---|---|---|---|---|
+| `insurance.premium.schedule.wizard` | `optimum_insurance_base.group_insurance_accountant` | 1 | 1 | 1 | 0 |
+| `insurance.premium.schedule.wizard` | `base.group_system` | 1 | 1 | 1 | 1 |
+| `insurance.commission.batch.line` | `optimum_insurance_base.group_insurance_accountant` | 1 | 1 | 1 | 1 |
+| `insurance.commission.batch.line` | `base.group_system` | 1 | 1 | 1 | 1 |
+| `insurance.commission.batch.reason.wizard` | `optimum_insurance_base.group_insurance_accountant` | 1 | 1 | 1 | 0 |
+| `insurance.commission.batch.reason.wizard` | `base.group_system` | 1 | 1 | 1 | 1 |
 
 ---
 
@@ -1674,16 +2436,18 @@ When a policy is generated from an accepted offer on an `insurance.request`, all
 
 | Category | Count |
 |----------|-------|
-| Delete Prevention (unlink) | 7 |
-| Write Validation (write) | 7 |
-| Python Constraints (@api.constrains) | 43 (with sub-controls) |
-| SQL UNIQUE Constraints | 22 (with sub-controls) |
-| SQL CHECK Constraints | 10 (with sub-controls) |
-| Foreign Key Restrictions (ondelete restrict) | 51 rows (49 controls: C-148 covers three FKs) |
-| Action Method Guards | 17 |
+| Delete Prevention (unlink) | 10 (C-190, C-198 added by commission-batch-receipts) |
+| Write Validation (write) | 24 (C-183, C-186, C-187, C-188, C-194, C-195, C-196, C-197, C-207, C-208, C-212, C-215 added) |
+| Python Constraints (@api.constrains) | 61 (with sub-controls; C-177, C-178 are formula figure constraints; C-179 to C-182, C-184, C-191 to C-193, C-201, C-202, C-205 added; C-134 retired → C-184, not counted; C-185 moved to SQL UNIQUE, D-211; C-210 added, D-219) |
+| SQL UNIQUE Constraints | 25 (with sub-controls; C-185 partial unique index, D-211; C-211 a contract is renewed once, D-226) |
+| SQL CHECK Constraints | 11 (with sub-controls) |
+| Foreign Key Restrictions (ondelete restrict) | 55 rows (53 controls: C-148 covers three FKs; C-213 added) |
+| Action Method Guards | 23 (C-189, C-199, C-200, C-206, C-209 added; C-189's confirm checks also re-run from a line `@api.constrains` on a correction in Confirmed, D-239, counted here once) |
 | Post-Policy Immutability | 13 (C-126 through C-132, with sub-controls C-130-01 to C-130-04, C-131-01, C-131-02) |
-| Conditional View Readonly | 9 patterns (with 4 extensions) |
-| Always-Readonly View Fields | 100+ fields across all modules |
+| Conditional View Readonly | 10 patterns (with 4 extensions) |
+| Always-Readonly View Fields | 100+ fields across all modules (incl. C-170, incentive payouts) |
 | No-Create Relational Pickers | 1 pattern (with 2 extensions) |
-| Field Access Controls (groups=) | 1 (C-136) |
-| **Total named controls** | **C-01 through C-155 (with sub-controls)** |
+| Feature Screen Rules (7d) | 2 (C-204, the batch-receipt screens; C-214, contract renewal) |
+| Field Access Controls (groups=, ACL) | 3 (C-136, C-169; C-203 the batch-receipt models' ACL) |
+| Amended by commission-batch-receipts | C-136 (flat flag gated), C-140 (the cleared lock also covers the method and transfer fields), C-143 (receipt pointer and `is_commission_batched` system-set), C-151 (the scan is a cheque's only) |
+| **Total named controls** | **C-01 through C-215 (with sub-controls; C-134 retired)** |
