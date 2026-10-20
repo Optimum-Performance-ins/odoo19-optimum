@@ -459,10 +459,12 @@ actual arch.
 
                     # During an upgrade, we can only use the views that have been
                     # fully upgraded already.
-                    if self.pool._init and sibling_primary_views and self.pool._init_modules:
-                        query = sibling_primary_views._get_filter_xmlid_query()
-                        sql = SQL(query, res_ids=tuple(sibling_primary_views.ids), modules=tuple(self.pool._init_modules))
-                        loaded_view_ids = {id_ for id_, in self.env.execute_query(sql)}
+                    if self.pool._init and sibling_primary_views:
+                        loaded_view_ids = set()
+                        if self.pool._init_modules:
+                            query = sibling_primary_views._get_filter_xmlid_query()
+                            sql = SQL(query, res_ids=tuple(sibling_primary_views.ids), modules=tuple(self.pool._init_modules))
+                            loaded_view_ids = {id_ for id_, in self.env.execute_query(sql)}
                         loaded_view_ids.update({
                             id
                             for id, xid in (sibling_primary_views - views.browse(loaded_view_ids)).get_external_id().items()
@@ -475,7 +477,8 @@ actual arch.
 
                 if view.type == 'qweb':
                     continue
-            except (etree.ParseError, ValueError) as e:
+            except (etree.ParseError, ValueError, TypeError) as e:
+                # Note: lxml < 5.0 raises ValueError; lxml 5.0+ / libxml2 2.12+ raises TypeError
                 err = ValidationError(_(
                     "Error while parsing or validating view:\n\n%(error)s",
                     error=e,
@@ -577,7 +580,8 @@ actual arch.
                 combined_arch = view._get_combined_arch()
                 if view.type != 'qweb':
                     view._postprocess_view(combined_arch, view.model, is_compute_warning_info=True)
-            except (etree.ParseError, ValueError) as e:
+            except (etree.ParseError, ValueError, TypeError) as e:
+                # Note: lxml < 5.0 raises ValueError; lxml 5.0+ / libxml2 2.12+ raises TypeError
                 view.warning_info = str(e)
 
     def _validate_xml_encoding(self, text):
@@ -611,7 +615,8 @@ actual arch.
                                 "Allowed types are: %(valid_types)s",
                                 view_type=values['type'], valid_types=', '.join(valid_types)
                             ))
-                    except (etree.ParseError, ValueError):
+                    except (etree.ParseError, ValueError, TypeError):
+                        # Note: lxml < 5.0 raises ValueError; lxml 5.0+ / libxml2 2.12+ raises TypeError
                         # don't raise here, the constraint that runs `self._check_xml` will
                         # do the job properly.
                         pass
@@ -664,7 +669,11 @@ actual arch.
 
     def unlink(self):
         # if in uninstall mode and has children views, emulate an ondelete cascade
-        if self.env.context.get('_force_unlink', False) and self.inherit_children_ids:
+        if (
+            (self.env.context.get('_force_unlink', False) or
+            self.env.context.get('cascade_unlink_views')) and
+            self.inherit_children_ids
+        ):
             self.inherit_children_ids.unlink()
         self.env.registry.clear_cache('templates')
         return super().unlink()

@@ -164,6 +164,41 @@ test("select option", async () => {
     expect.verifySteps(["Hello"]);
 });
 
+test("select option while a search is pending", async () => {
+    class Parent extends Component {
+        static components = { AutoComplete };
+        static template = xml`<AutoComplete value="state.value" sources="sources"/>`;
+        static props = [];
+
+        state = useState({ value: "" });
+        sources = buildSources((search) => {
+            expect.step(`search: ${search}`);
+            return [
+                item("World", this.onSelect.bind(this)),
+                item("Hello", this.onSelect.bind(this)),
+            ];
+        });
+
+        onSelect(option) {
+            this.state.value = option.label;
+        }
+    }
+
+    await mountWithCleanup(Parent);
+    await contains(".o-autocomplete input").click();
+    expect(".o-autocomplete .dropdown-menu").toHaveCount(1);
+    expect.verifySteps(["search: "]);
+
+    await contains(".o-autocomplete input").fill("W", { confirm: false });
+    await contains(queryFirst(".o-autocomplete--dropdown-item")).click();
+    expect(".o-autocomplete input").toHaveValue("World");
+    expect(".o-autocomplete .dropdown-menu").toHaveCount(0);
+
+    await runAllTimers();
+    expect(".o-autocomplete .dropdown-menu").toHaveCount(0);
+    expect.verifySteps([]);
+});
+
 test("autocomplete with resetOnSelect='true'", async () => {
     class Parent extends Component {
         static components = { AutoComplete };
@@ -983,4 +1018,30 @@ test("do not attempt to scroll if element is null", async () => {
     def.resolve();
     await animationFrame();
     expect(".o-autocomplete .dropdown-item").toHaveCount(23); // + 3 items - loading
+});
+
+test("input disables browser autocomplete by default", async () => {
+    class Parent extends Component {
+        static components = { AutoComplete };
+        static template = xml`<AutoComplete value="'Hello'" sources="sources"/>`;
+        static props = [];
+
+        sources = buildSources(() => [item("World"), item("Hello")]);
+    }
+
+    await mountWithCleanup(Parent);
+    expect(".o-autocomplete--input").toHaveAttribute("autocomplete", "off");
+});
+
+test("browser autocomplete attribute can be overridden via prop", async () => {
+    class Parent extends Component {
+        static components = { AutoComplete };
+        static template = xml`<AutoComplete value="'Hello'" sources="sources" autocomplete="'name'"/>`;
+        static props = [];
+
+        sources = buildSources(() => [item("World"), item("Hello")]);
+    }
+
+    await mountWithCleanup(Parent);
+    expect(".o-autocomplete--input").toHaveAttribute("autocomplete", "name");
 });

@@ -123,7 +123,7 @@ class IrUiView(models.Model):
         usage of a custom snippet and copy its translations.
         """
         lang_value = record[html_field]
-        if not lang_value:
+        if not lang_value or not lang_value.strip():
             return
 
         try:
@@ -198,13 +198,23 @@ class IrUiView(models.Model):
         langs.add('en_US')
 
         # 2. Set translations
-        new_value = {
-            lang: field_to.translate(lambda term: translation_dictionary.get(term, {}).get(lang), record_to[name_field_to])
-            for lang in langs
-        }
-        record_to.env.cache.update_raw(record_to, field_to, [new_value], dirty=True)
+        # The orm layer currently does not offer a way to keep the delayed
+        # translations when changing translations, so we craft the desired
+        # dict of translations and directly write it to the cache
+        stored_translation = field_to._get_stored_translations(record_to)
+        for lang in langs:
+            lang_ = ('_' + lang) if ('_' + lang) in stored_translation else lang
+            stored_translation[lang_] = field_to.translate(
+                lambda term: translation_dictionary.get(term, {}).get(lang),
+                record_to[name_field_to]
+            )
+            if not self.env.context.get('delay_translations') and lang_.startswith('_'):
+                stored_translation[lang] = stored_translation.pop(lang_)
+
+        record_to.env.cache.update_raw(record_to, field_to, [stored_translation], dirty=True)
         # Call `write` to trigger compute etc (`modified()`)
-        record_to.with_context(check_translations=False)[name_field_to] = new_value[lang_env]
+        record_to = record_to.with_context(check_translations=False)
+        record_to[name_field_to] = record_to[name_field_to]
 
     @api.model
     def _save_oe_structure_hook(self):
@@ -345,7 +355,14 @@ class IrUiView(models.Model):
         if not self._are_archs_equal(old_arch, new_arch):
             self._set_noupdate()
             self.write({'arch': etree.tostring(new_arch, encoding='unicode')})
-            self._copy_custom_snippet_translations(self, 'arch_db')
+            # TODO: on master, use `_get_template_view` instead (and add the
+            # website in the context where we call `save`)
+            view = self._get_written_view()
+            view._copy_custom_snippet_translations(view, 'arch_db')
+
+    # TODO: remove on master
+    def _get_written_view(self):
+        return self
 
     @api.model
     def _view_get_inherited_children(self, view):

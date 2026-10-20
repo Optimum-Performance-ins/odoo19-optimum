@@ -5,7 +5,7 @@
 # Translators:
 # Alina Lisnenko <alina.lisnenko@erp.co.ua>, 2023, 2026.
 # Martin Trigaux, 2023
-# Weblate <noreply-mt-weblate@weblate.org>, 2025.
+# Weblate <noreply-mt-weblate@weblate.org>, 2025, 2026.
 # Vlad Patenko <vlad.patenko@gmail.com>, 2026.
 # Lohushchenko <nadiia.lohushchenko@self-erp.com>, 2026.
 # Oleksii Lytvynov <oleksii.lytvynov@self-erp.com>, 2026.
@@ -13,8 +13,8 @@ msgid ""
 msgstr ""
 "Project-Id-Version: Odoo Server 16.0\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-03-20 18:35+0000\n"
-"PO-Revision-Date: 2026-04-24 07:58+0000\n"
+"POT-Creation-Date: 2026-06-19 17:35+0000\n"
+"PO-Revision-Date: 2026-09-19 17:33+0000\n"
 "Last-Translator: Vlad Patenko <vlad.patenko@gmail.com>\n"
 "Language-Team: Ukrainian <https://translate.odoo.com/projects/odoo-19/hr/uk/>"
 "\n"
@@ -26,7 +26,7 @@ msgstr ""
 "? 0 : n % 1 == 0 && n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > "
 "14) ? 1 : n % 1 == 0 && (n % 10 ==0 || (n % 10 >=5 && n % 10 <=9) || (n % "
 "100 >=11 && n % 100 <=14 )) ? 2: 3);\n"
-"X-Generator: Weblate 5.17\n"
+"X-Generator: Weblate 2026.8.1\n"
 
 #. module: hr
 #. odoo-python
@@ -59,6 +59,14 @@ msgid ""
 "- Create a new employee if this employee should have multiple active "
 "contracts."
 msgstr ""
+"Для користувача %s уже діє контракт у вибраний період.\n"
+"\n"
+"Будь ласка, виконайте одну з дій:\n"
+"\n"
+"- Змініть дату початку, щоб вона не збігалася з датою чинного контракту, "
+"або\n"
+"- Створіть нового співробітника, якщо цей співробітник повинен мати кілька "
+"активних контрактів."
 
 #. module: hr
 #: model:ir.actions.report,print_report_name:hr.hr_employee_print_badge
@@ -138,8 +146,8 @@ msgid ""
 "<b>Congratulations!</b> May I recommend you to setup an <a "
 "href=\"%s\">onboarding plan?</a>"
 msgstr ""
-"<b>Вітаємо!</b> Чи можемо рекомендувати вам встановити <a "
-"href=\"%s\">планування?</a>"
+"<b>Вітаємо!</b> Чи можемо рекомендувати вам встановити <a href=\"%s\">"
+"планування?</a>"
 
 #. module: hr
 #: model_terms:ir.ui.view,arch_db:hr.hr_department_view_kanban
@@ -208,6 +216,7 @@ msgstr "<i class=\"fa fa-fw me-2 fa-phone text-primary\" title=\"Phone\"/>"
 msgid ""
 "<i class=\"fa fa-fw me-2 fa-suitcase text-primary\" title=\"Job Position\"/>"
 msgstr ""
+"<i class=\"fa fa-fw me-2 fa-suitcase text-primary\" title=\"Job Position\"/>"
 
 #. module: hr
 #: model_terms:ir.ui.view,arch_db:hr.hr_employee_public_view_form
@@ -1076,7 +1085,6 @@ msgid "Attachment Count"
 msgstr "Підрахунок прикріплення"
 
 #. module: hr
-#: model_terms:ir.ui.view,arch_db:hr.res_users_view_form
 #: model_terms:ir.ui.view,arch_db:hr.res_users_view_form_preferences
 msgid "Attendance PIN"
 msgstr ""
@@ -1252,7 +1260,7 @@ msgid ""
 "Before creating a new contract, close the current one by setting an end date."
 msgstr ""
 "Перед створенням нового контракту закрийте активний за допомогою кінцевої "
-"дати"
+"дати."
 
 #. module: hr
 #. odoo-javascript
@@ -2948,7 +2956,7 @@ msgstr ""
 #: model:ir.model.fields,field_description:hr.field_hr_employee__is_custom_job_title
 #: model:ir.model.fields,field_description:hr.field_hr_version__is_custom_job_title
 msgid "Is Custom Job Title"
-msgstr ""
+msgstr "Своя назва посади"
 
 #. module: hr
 #: model:ir.model.fields,field_description:hr.field_hr_employee__is_flexible
@@ -3042,13 +3050,13 @@ msgstr "Опис посади"
 #: model_terms:ir.ui.view,arch_db:hr.view_employee_form
 #: model_terms:ir.ui.view,arch_db:hr.view_job_filter
 msgid "Job Position"
-msgstr "Вакансія"
+msgstr "Посада"
 
 #. module: hr
 #: model:ir.actions.act_window,name:hr.action_hr_job
 #: model:ir.ui.menu,name:hr.menu_view_hr_job
 msgid "Job Positions"
-msgstr "Вакансії"
+msgstr "Посади"
 
 #. module: hr
 #: model_terms:ir.ui.view,arch_db:hr.view_hr_job_form
@@ -3097,7 +3105,7 @@ msgstr "Час останньої дії"
 #: model:ir.model.fields,field_description:hr.field_hr_employee__last_modified_uid
 #: model:ir.model.fields,field_description:hr.field_hr_version__last_modified_uid
 msgid "Last Modified by"
-msgstr ""
+msgstr "Востаннє змінено"
 
 #. module: hr
 #: model:ir.model.fields,field_description:hr.field_hr_employee__last_modified_date
@@ -3183,7 +3191,7 @@ msgstr "ПІБ"
 #. module: hr
 #: model_terms:ir.actions.act_window,help:hr.action_hr_job
 msgid "Let's create a job position"
-msgstr ""
+msgstr "Давайте створимо посаду"
 
 #. module: hr
 #: model_terms:ir.actions.act_window,help:hr.action_hr_contract_templates
@@ -3252,7 +3260,7 @@ msgstr "Основне прикріплення"
 #: model_terms:ir.ui.view,arch_db:hr.res_users_view_form
 #: model_terms:ir.ui.view,arch_db:hr.res_users_view_form_preferences
 msgid "Main Work Location"
-msgstr ""
+msgstr "Основне місце роботи"
 
 #. module: hr
 #: model_terms:hr.job,website_description:hr.job_developer
@@ -3662,6 +3670,18 @@ msgstr ""
 
 #. module: hr
 #. odoo-javascript
+#: code:addons/hr/static/src/components/avatar_card/avatar_card_popover_patch.xml:0
+msgid "Open Contact Profile"
+msgstr ""
+
+#. module: hr
+#. odoo-javascript
+#: code:addons/hr/static/src/components/avatar_card/avatar_card_popover_patch.xml:0
+msgid "Open Employee Profile (activates company)"
+msgstr ""
+
+#. module: hr
+#. odoo-javascript
 #: code:addons/hr/static/src/core/web/thread_actions.js:0
 msgid "Open Profile"
 msgstr "Відкрити профіль"
@@ -3721,8 +3741,8 @@ msgid ""
 "application."
 msgstr ""
 "PIN-код використовується для реєстрації входу/виходу в режимі Kiosk модуля "
-"відвідування (якщо ввімкнено в Налаштуваннях) і для зміни касира в програмі "
-"«Точка продажу»."
+"відвідування (якщо ввімкнено в Налаштуваннях) і для зміни касира в програмі «"
+"Точка продажу»."
 
 #. module: hr
 #: model:ir.model.fields,field_description:hr.field_hr_department__parent_id
@@ -3972,7 +3992,7 @@ msgstr "Приватний"
 #: model_terms:ir.ui.view,arch_db:hr.res_users_view_form_preferences
 #: model_terms:ir.ui.view,arch_db:hr.view_employee_form
 msgid "Private Address"
-msgstr "Приватна адреса"
+msgstr "Адреса проживання"
 
 #. module: hr
 #: model:ir.model.fields,field_description:hr.field_hr_employee__private_car_plate
@@ -4347,7 +4367,7 @@ msgstr "Зберегти"
 #: model_terms:ir.ui.view,arch_db:hr.hr_contract_template_form_view
 #: model_terms:ir.ui.view,arch_db:hr.view_employee_form
 msgid "Schedule"
-msgstr "Запланувати"
+msgstr "Розклад"
 
 #. module: hr
 #: model:ir.model.fields,field_description:hr.field_hr_employee__study_school
@@ -4701,7 +4721,7 @@ msgstr "Контракт %s скоро закінчиться."
 #: model_terms:ir.ui.view,arch_db:hr.hr_contract_template_form_view
 #: model_terms:ir.ui.view,arch_db:hr.view_employee_form
 msgid "The default working hours are set in configuration."
-msgstr ""
+msgstr "Робочі години за замовчуванням вказані в налаштуваннях."
 
 #. module: hr
 #. odoo-python
@@ -5056,8 +5076,24 @@ msgid "Version"
 msgstr "Версія"
 
 #. module: hr
+#: model:ir.model.fields,field_description:hr.field_hr_employee__version_revision
+msgid "Version Revision"
+msgstr ""
+
+#. module: hr
 #: model:ir.model.fields,field_description:hr.field_hr_employee__versions_count
 msgid "Versions Count"
+msgstr ""
+
+#. module: hr
+#: model_terms:ir.ui.view,arch_db:hr.hr_version_list_view
+msgid "View"
+msgstr ""
+
+#. module: hr
+#. odoo-javascript
+#: code:addons/hr/static/src/components/avatar_card/avatar_card_popover_patch.xml:0
+msgid "View Profile"
 msgstr ""
 
 #. module: hr

@@ -135,8 +135,10 @@ patch(Thread.prototype, {
                     extraData.selected_answer_id
                 );
             }
+            const authorModelName = this.store.self?.Model.getName();
             const temporaryMsg = this.store["mail.message"].insert({
-                author_id: this.store.self,
+                author_id: authorModelName === "res.partner" ? this.store.self : undefined,
+                author_guest_id: authorModelName === "mail.guest" ? this.store.self : undefined,
                 body: await generateEmojisOnHtml(body, { allowEmojiLoading: false }),
                 id: this.store.getNextTemporaryId(),
                 model: "discuss.channel",
@@ -144,9 +146,15 @@ patch(Thread.prototype, {
                 thread: this,
             });
             this.messages.push(temporaryMsg);
-            this?.chatbot?._simulateTyping(2 ** 31 - 1);
+            if (this.chatbot?.currentStep?.step_type !== "free_input_multi") {
+                this?.chatbot?._simulateTyping(2 ** 31 - 1);
+            }
             const thread = await this.store.env.services["im_livechat.livechat"].persist(this);
-            temporaryMsg.author_id = this.store.self; // Might have been created after persist.
+            if (this.store.self_partner) {
+                temporaryMsg.author_id = this.store.self_partner; // Might have been created after persist.
+            } else {
+                temporaryMsg.author_guest_id = this.store.self_guest;
+            }
             if (!thread) {
                 return;
             }
@@ -154,7 +162,13 @@ patch(Thread.prototype, {
             return thread.post(...arguments).then(() => thread.readyToSwapDeferred.resolve());
         }
         const message = await super.post(...arguments);
-        await this.chatbot?.processAnswer(message);
+        if (this.chatbot?.currentStep?.step_type === "free_input_multi") {
+            // Multi-line answers are processed after a debounce delay: do not wait to swap
+            // temporary thread with persisted one.
+            this.chatbot.processAnswer(message);
+        } else {
+            await this.chatbot?.processAnswer(message);
+        }
         return message;
     },
 

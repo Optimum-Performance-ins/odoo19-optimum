@@ -27,9 +27,7 @@ export class ProductListPage extends Component {
         this.subCategoryContainerRef = useRef("sub_cat_container");
 
         const initCategories = !this.selfOrder.currentCategory;
-        if (initCategories) {
-            this.selfOrder.computeAvailableCategories();
-        }
+        this.selfOrder.computeAvailableCategories();
         const availableCategories = this.selfOrder.availableCategories;
         const topCategories = availableCategories.filter((category) => !category.parent_id);
         const selectedCategory =
@@ -211,7 +209,7 @@ export class ProductListPage extends Component {
                     }))
                 );
             }
-        } else if (product.isConfigurable()) {
+        } else if (this.selfOrder.isProductConfigurable(product)) {
             this.router.navigate("product", { id: product.id });
         } else {
             if (!this.selfOrder.ordering) {

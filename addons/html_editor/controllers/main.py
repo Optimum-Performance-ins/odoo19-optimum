@@ -409,6 +409,9 @@ class HTML_Editor(http.Controller):
         Creates a modified copy of an attachment and returns its image_src to be
         inserted into the DOM.
         """
+        format_error_msg = _("Uploaded image's format is not supported. Try with: %s", ', '.join(SUPPORTED_IMAGE_MIMETYPES.values()))
+        if mimetype and mimetype not in SUPPORTED_IMAGE_MIMETYPES:
+            return {'error': format_error_msg}
         self._clean_context()
         attachment = request.env['ir.attachment'].browse(attachment.id)
         if not data and attachment.datas:
@@ -444,6 +447,12 @@ class HTML_Editor(http.Controller):
             # Rights check works with res_id=0 because browse(0) returns an
             # empty record set.
             request.env[fields['res_model']].browse(fields['res_id']).check_access('write')
+
+            mimetype_exempt = any(
+                request.env.user.has_group(group) for group in attachment._get_mimetype_exempt_groups()
+            )
+            if not mimetype_exempt:
+                request.env['ir.ui.view'].sudo(False).check_access('write')
 
             # Sudo because restricted editor will not be able to copy the record
             attachment = attachment.sudo().copy(fields).sudo(False)
@@ -642,6 +651,8 @@ class HTML_Editor(http.Controller):
 
     @http.route(["/web_editor/generate_text", "/html_editor/generate_text"], type="jsonrpc", auth="user")
     def generate_text(self, prompt, conversation_history):
+        if not request.env.user._is_internal():
+            raise AccessError(_("Only internal users can use AI text generation."))
         try:
             IrConfigParameter = request.env['ir.config_parameter'].sudo()
             olg_api_endpoint = IrConfigParameter.get_param('html_editor.olg_api_endpoint', DEFAULT_OLG_ENDPOINT)
@@ -730,14 +741,16 @@ class HTML_Editor(http.Controller):
 
             record = model.browse(record_id)
 
-            result = {}
-            if 'description' in record:
-                result['description'] = html.fromstring(record.description).text_content() if record.description else ""
+            description_field = 'description' if 'description' in record else None
+            name_field = 'link_preview_name' if 'link_preview_name' in record else 'display_name'
 
-            if 'link_preview_name' in record:
-                result['link_preview_name'] = record.link_preview_name
-            elif 'display_name' in record:
-                result['display_name'] = record.display_name
+            record.read([field for field in (description_field, name_field) if field])
+
+            result = {name_field: record[name_field]}
+
+            if description_field:
+                description = record[description_field]
+                result[description_field] = html.fromstring(description).text_content() if description else ""
 
             return result
         except (MissingError) as e:

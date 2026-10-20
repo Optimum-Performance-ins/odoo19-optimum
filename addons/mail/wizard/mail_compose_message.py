@@ -765,7 +765,17 @@ class MailComposeMessage(models.TransientModel):
     def action_send_mail(self):
         """ Used for action button that do not accept arguments. """
         self._action_send_mail(auto_commit=False)
-        return {'type': 'ir.actions.act_window_close'}
+        res_ids = self._evaluate_res_ids()
+        record_name = False
+        if self.model and len(res_ids) == 1 and self.composition_mode == 'comment':
+            record_name = self.env[self.model].browse(res_ids[0]).display_name
+        return {
+            "type": "ir.actions.client",
+            "tag": "action_send_mail_callback",
+            "params": {
+                "record_name": record_name,
+            },
+        }
 
     def _action_send_mail(self, auto_commit=False):
         """ Process the wizard content and proceed with sending the related
@@ -865,9 +875,8 @@ class MailComposeMessage(models.TransientModel):
             # running several times on same records in case of issue
             if auto_commit is True:
                 counter_mails_done += len(prepared_mail_values_filtered)
-                self.env['ir.cron']._notify_progress(done=counter_mails_done,
+                self.env['ir.cron']._commit_progress(processed=counter_mails_done,
                                                       remaining=len(res_ids) - counter_mails_done)
-                self.env.cr.commit()
             self.env.invalidate_all()
 
         return mails_sudo
@@ -1265,7 +1274,8 @@ class MailComposeMessage(models.TransientModel):
                 if self.template_id:
                     new_mail_message_values['email_add_signature'] = False
                 message_inmem = self.env['mail.message'].new(new_mail_message_values)
-                for _lang, render_values, recipients_group_data in record._notify_get_classified_recipients_iterator(
+                layout_record = record if isinstance(record, self.pool['mail.thread']) else self.env['mail.thread']
+                for _lang, render_values, recipients_group_data in layout_record._notify_get_classified_recipients_iterator(
                     message_inmem,
                     [{
                         'active': True,
@@ -1285,7 +1295,7 @@ class MailComposeMessage(models.TransientModel):
                     model_description=False,  # force dynamic computation
                     force_email_lang=lang,
                 ):
-                    mail_body = record._notify_by_email_render_layout(
+                    mail_body = layout_record._notify_by_email_render_layout(
                         message_inmem,
                         recipients_group_data,
                         msg_vals=msg_vals,
