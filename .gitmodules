@@ -34,3 +34,6 @@
 [submodule "custom-addons/optimum_insurance_collection"]
 	path = custom-addons/optimum_insurance_collection
 	url = https://github.com/Optimum-Performance-ins/optimum_insurance_collection
+[submodule "custom-addons/optimum_currency_cbe"]
+	path = custom-addons/optimum_currency_cbe
+	url = https://github.com/Optimum-Performance-ins/optimum_currency_cbe

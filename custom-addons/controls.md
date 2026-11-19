@@ -125,6 +125,31 @@ This document catalogs all controls that prevent write, delete, or modification 
 
 See C-168 (incentive payout).
 
+### C-221 — Only a draft or cancelled trip can be deleted
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery` |
+| **File** | `models/collection_trip.py` (`_unlink_only_before_it_starts`, `@api.ondelete`) |
+| **Mechanism** | `@api.ondelete(at_uninstall=False)` via `_require_state`. On top of it the ACL gives delete on trips to `base.group_system` only (C-241). The trip's items stay and are pending again (the FK empties their trip) |
+| **Condition** | any trip in the recordset is `assigned`, `in_progress` or `completed`. Example: TRIP/2026/0007 on the road → refused; cancel it first, then the administrator deletes it |
+| **Error** | _"Only a draft or cancelled trip can be deleted: %s"_ |
+| **FR** | FR-COL-002-07-01 (D-25) |
+| **Tests** | `TestAccess.test_the_collection_manager_cancels_and_resets_only_the_admin_deletes` |
+
+### C-222 — An item is removed only before its trip starts
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery.item` |
+| **File** | `models/collection_trip_item.py` (`_unlink_only_before_the_trip_leaves`, `@api.ondelete`) |
+| **Condition** | the item has a result, or its trip is `in_progress` or `completed`. Example: the CHQ-12 item on a trip that has started → refused; the same item pending, or on a draft trip → removed |
+| **Error** | _"An item can be removed only before its trip starts: %s"_ |
+| **FR** | FR-COL-002-07-03 |
+| **Tests** | — (no test refuses it yet) |
+
 ---
 
 ## 2. Write Validation (`write()` overrides)
@@ -423,6 +448,182 @@ See C-168 (incentive payout).
 | **FR** | FR-BASE-009-04-13 |
 | **Tests** | `TestContractRenewal.test_06_renewed_from_is_fixed` |
 
+### C-223 — A completed trip does not change
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery` |
+| **File** | `models/collection_trip.py` (`_LOCK_TIERS`, `write`) |
+| **Mechanism** | base `insurance.lock.tier.mixin`: `priority`, `notes`, `cost`, the cost document, `item_ids`, `scheduled_date` and `assigned_employee_id` lock at `completed`; `sequence` never locks (reordering a day). The form's read-only conditions come from the same tiers |
+| **Condition** | a locked field is written on a `completed` trip. Example: TRIP/2026/0007 completed with cost 60 → changing the cost or taking an item off is refused; dragging it to another place in the day is allowed |
+| **Error** | _"%(trip)s is completed: it can no longer change (%(fields)s)."_ |
+| **FR** | FR-COL-002-08 |
+| **Tests** | `TestTripFlow.test_a_completed_trip_does_not_change`, `test_the_form_carries_the_lock_tiers` |
+
+### C-224 — A trip's state changes only through its action
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery` |
+| **File** | `models/collection_trip.py` (`write`, `STATE_ACTIONS`, ctx `VIA_ACTION`) |
+| **Mechanism** | a `state` written from outside an action (a kanban drag, an import, a script) is popped and its action runs instead, so C-236 to C-239 apply either way. A value outside the five states is refused |
+| **Condition** | `state` is not one of `draft`, `assigned`, `in_progress`, `completed`, `cancelled`. Example: an import writing `out_for_delivery` → refused; a drag from Draft to Completed → refused by C-236 |
+| **Error** | _"A trip has no state %s."_ |
+| **FR** | FR-COL-003-04, FR-COL-003-04-02 |
+| **Tests** | `TestTripFlow.test_an_unknown_state_is_refused`, `test_a_draft_dragged_to_completed_is_refused`, `test_a_drag_to_assigned_without_an_agent_is_refused`, `test_a_drag_to_completed_needs_the_items_results` |
+
+### C-225 — A closed trip keeps its agent
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery` |
+| **File** | `models/collection_trip.py` (`_check_agent_change`, from `write`) |
+| **Condition** | `assigned_employee_id` is written on a `completed` or `cancelled` trip. Until then the leader changes the agent, on the road too, and the papers out with the old agent follow the new one (FR-COL-004-02-02). Example: TRIP/2026/0007 cancelled → choosing Sayed is refused |
+| **Error** | _"%s is closed: its agent can no longer change."_ |
+| **FR** | FR-COL-003-08 |
+| **Tests** | — (a completed trip is refused first by C-223; no test for a cancelled one) |
+
+### C-226 — What a completed trip carried does not change
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery.item` |
+| **File** | `models/collection_trip_item.py` (`write`, first check) |
+| **Condition** | any field is written on an item whose trip is `completed`. Example: the notes of the CHQ-12 item on completed TRIP/2026/0007 → refused |
+| **Error** | _"%s is completed: what it carried can no longer change."_ |
+| **FR** | FR-COL-002-08 |
+| **Tests** | `TestTripFlow.test_a_completed_trip_does_not_change` |
+
+### C-227 — Items move between trips only before they start
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery.item` |
+| **File** | `models/collection_trip_item.py` (`_check_trip_takes_items` from `create` and `write`; `write` on `trip_id`) |
+| **Condition** | (a) the item already has a result; (b) the trip it leaves is `in_progress` or `completed`; (c) the trip it joins is not `draft` or `assigned`. Example: adding the policy document to TRIP/2026/0007 once it started → refused; moving it between two draft trips → allowed |
+| **Error** | (a) _"An item with its result stays on its trip: %s"_; (b) _"Items are taken off a trip only while it is draft or assigned: %s"_; (c) _"Items are put on a trip only while it is draft or assigned: %s"_ |
+| **FR** | FR-COL-012-04-01 |
+| **Tests** | `TestPendingItems.test_items_come_and_go_until_the_trip_starts` |
+
+### C-228 — An item gets its result on the road, once
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery.item` |
+| **File** | `models/collection_trip_item.py` (`write` on `result` / `failure_reason`; `_set_result` behind the Complete, Left at Office and Failed buttons) |
+| **Condition** | the item's trip is not `in_progress`, or (buttons) the item already has a result. Example: Complete on an item of an assigned trip → refused; Failed on an item already Completed → refused |
+| **Error** | write: _"An item gets its result while its trip is on the road: %s"_; buttons: _"%s: its trip is not on the road."_, _"%s already has its result."_ |
+| **FR** | FR-COL-012-05 |
+| **Tests** | `TestTripFlow.test_an_item_gets_its_result_on_the_road_once` |
+
+### C-229 — An item the system listed keeps its leg
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery.item` |
+| **File** | `models/collection_trip_item.py` (`write` on `leg`) |
+| **Condition** | the item has a `source_ref` (the system listed it) and the new leg differs. Example: the CHQ-12 item client → insurer changed to insurer pickup → refused |
+| **Error** | _"%s was listed by the system for what it carries: its leg cannot change."_ |
+| **FR** | FR-COL-002-01-04 |
+| **Tests** | `TestPendingItems.test_a_listed_item_keeps_its_leg` |
+
+### C-230 — Nobody types where a paper is
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.document.custody.mixin` (on `insurance.policy`, `insurance.policy.endorsement`, `insurance.cheque`, `insurance.claim`) |
+| **File** | `models/mixins/document_custody_mixin.py` (`create`, `write`) |
+| **Mechanism** | `custody_state`, `custody_agent_id` and `custody_since` are written only through `_custody_write`, with the system's rights and ctx `CUSTODY_MOVE` (D-24). The fields are `copy=False`. A settled claim's lock is skipped for this write only (`insurance_claim._custody_write`, `skip_settled_lock`, D-41) |
+| **Condition** | any custody field is in the values of a `create` or `write` without ctx `CUSTODY_MOVE`, administrator included. Example: an import creating a cheque `with_insurer` → refused |
+| **Error** | _"Where a paper is changes only with its trips: it cannot be typed."_ |
+| **FR** | FR-COL-004-05 (D-34) |
+| **Tests** | `TestDocumentTracking.test_nobody_types_the_place` |
+
+### C-244 — A claim's fields lock at their state step
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.claim`, `insurance.claim.receipt`, `claim.coverage.line`, `claim.has.vehicle`, `vehicle.inspection.line.loss` |
+| **File** | `models/insurance_claim.py` (`_check_claim_lock`, `write`); vehicle: `models/insurance_claim.py` (`VEHICLE_LOCK_TIERS`), `models/claim_has_vehicle.py`, `models/vehicle_inspection_line_loss.py` |
+| **Mechanism** | `CLAIM_LOCK_TIERS` gives each field the state at which it locks; `lock_level` (not stored) follows the state, Settled and Rejected being Closed. The receipt, coverage line and vehicle line models ask the claim (`_check_claim_lock`). Skipped only in superuser mode with ctx `skip_settled_lock` (D-279, D-280) |
+| **Condition** | a field is written at or after its lock level. Example: CLM/0042 in Fixing: `claim_date` (locks at Missing Documents) → refused; a new receipt (locks at Waiting for Payment) → allowed; the coverage analysis (locks at Settled / Rejected) → allowed. The expected settlement date (FR-BASE-008-10-02) locks at Settled / Rejected only. A mass write is refused when any one claim is locked. A Settled or Rejected claim cannot be deleted. Vehicle (D-287, D-290): the Vehicles tab stays editable until Waiting for Payment, but vehicles are added / removed only until Informed Insurance Company; the inspection link locks at Fixing; `labor_cost` and the losses (created, changed, deleted; a loss on a policy inspection has no claim and is not locked) at Waiting for Receipt; `repair_status`, `is_total_loss`, `service_centre_id` and `description` at Waiting for Payment; all locked when Settled or Rejected |
+| **Error** | _"Cannot modify claim %(name)s in %(state)s. Locked field(s): %(fields)s."_ |
+| **FR** | FR-BASE-008-05-05, FR-VEH-006-01-05, FR-VEH-006-01-07, FR-VEH-007-10-10 |
+| **Tests** | `TestClaimLockGuard.test_one_field_per_tier_locks_at_its_step`, `test_receipts_lock_at_waiting_for_payment`, `test_coverage_lines_lock_when_closed`, `test_the_message_names_the_claim_state_and_fields`, `test_context_alone_does_not_bypass`, `test_a_closed_claim_cannot_be_deleted`, `test_closing_fields_are_system_written`; `TestClaimViewDrift`; vehicle: `TestClaimVehicleLockTiers.test_vehicles_add_and_remove_until_informed`, `test_inspection_link_locks_at_fixing`, `test_repair_fields_stay_open_until_waiting_for_payment`, `test_the_vehicle_pick_locks_with_the_lines`, `test_labor_locks_at_waiting_for_receipt`, `test_losses_lock_at_waiting_for_receipt`, `test_form_write_on_lines_follows_the_child_tier`, `test_a_loss_without_a_claim_is_not_claim_locked`, `test_everything_locks_on_a_rejected_claim`, `test_claim_vehicle_view_drift` |
+
+### C-245 — A claim is settled only when its analysis and inspection are done
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.claim` |
+| **File** | `models/insurance_claim.py` (`_check_settle_ready`, `write`; the Settle Claim button, `action_settle_claim`, is a plain write and calls the same one) |
+| **Condition** | a write with `state = 'settled'` by anyone, whether the status bar, a kanban drag or the Settle Claim button. Example: CLM/0042 dragged to Settled with a coverage still "Used" and no amount → refused; with its inspection still Scheduled → refused; with the analysis complete and the inspection Done → Settled, and `settled_on` / `settled_by_id` stamped in that same write with the date and the user. The inspection is never written by settling (D-275, D-282) |
+| **Error** | _"Cannot settle: these coverages still need an amount (or should be set to Unused): %(names)s"_; _"Cannot settle: the inspection is not completed yet."_ |
+| **FR** | FR-BASE-008-05-09, FR-BASE-008-07-05 |
+| **Tests** | `TestClaimStatus.test_settle_needs_a_complete_analysis`, `test_settle_needs_a_done_inspection`, `test_settle_stamps_date_and_user`, `test_the_settle_button_settles_like_the_status_bar` |
+
+### C-248 — A new claim starts Fresh
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.claim` |
+| **File** | `models/insurance_claim.py` (`create`) |
+| **Condition** | a user (not superuser) creates a claim with a `state` other than Fresh. Example: a create with `state = 'settled'` → refused. Superuser creation (fixtures, imports) is unchanged |
+| **Error** | _"A new claim starts Fresh."_ |
+| **FR** | FR-BASE-008-05-02 |
+| **Tests** | `TestClaimStatus.test_a_new_claim_cannot_start_closed` |
+
+### C-249 — A claim needs an expected settlement date
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.claim` |
+| **File** | `models/insurance_claim.py` (`expected_settlement_date`, `create`); `migrations/19.0.1.5/pre-migrate.py` |
+| **Mechanism** | `required=True` on the plain field (NOT NULL in the database); `create()` fills it with the claim date + 30 days (`EXPECTED_SETTLEMENT_DAYS`) when it is left out; the migration does the same for existing claims. It locks at Settled / Rejected through `CLAIM_LOCK_TIERS` (C-244) |
+| **Condition** | a claim is created or saved without an expected settlement date. Example: a claim dated 2026-01-01 created without one gets 2026-01-31; clearing the date on the form → refused |
+| **Error** | Odoo's required-field error |
+| **FR** | FR-BASE-008-10-01, FR-BASE-008-10-02 |
+| **Tests** | `TestClaimExpectedSettlement.test_default_is_claim_date_plus_30`, `test_default_without_claim_date_is_today_plus_30`, `test_explicit_date_is_kept`, `test_writable_at_open_steps_locked_when_closed` |
+
+### C-250 — The closing stamps exist only on a closed claim
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.claim` |
+| **File** | `models/insurance_claim.py` (`_check_closing_fields_match_state`, `action_back_to_fresh`); `migrations/19.0.1.6/pre-migrate.py` |
+| **Constrains** | `state`, `denial_reason_id`, `settled_on`, `settled_by_id` |
+| **Mechanism** | `@api.constrains`, so it holds on create and on write, for the superuser too. Back to Fresh clears the three fields (C-247); the migration clears the stamps left on claims reopened before the rule |
+| **Condition** | a rejection reason on a claim that is not Rejected, or a settlement date or user on a claim that is not Settled. Example: a create with `settled_on` filled on a Fresh claim → refused |
+| **Error** | _"Claim %s has a rejection reason but is not Rejected."_; _"Claim %s has a settlement date or user but is not Settled."_ |
+| **FR** | FR-BASE-008-05-10 (D-292) |
+| **Tests** | `TestClaimStatus.test_closing_stamps_only_on_a_closed_claim`, `test_back_to_fresh_reopens_a_settled_claim` |
+
+### C-251 — A claim's calculated fields are set only by the system
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base`, `optimum_insurance_vehicle` |
+| **Model** | `insurance.claim`, `claim.has.vehicle` |
+| **File** | base `models/insurance_claim.py` (`_raise_if_calculated`, called from `write`); vehicle `models/claim_has_vehicle.py` (`write`) |
+| **Mechanism** | `write()` guard, at every state, for every caller but the superuser. It refuses any stored, read-only computed or related field in the values. The lock guard (C-244) skips such fields, and the ORM does not enforce `readonly` on `write()`; the system's own recalculation does not come through `write()` |
+| **Condition** | a user's write names a calculated field. Example: `write({'reimbursed_loss_value': 0})` on a settled claim, or `write({'loss_value': 5})` on a claim vehicle line → refused |
+| **Error** | _"Calculated by the system and cannot be set: %s."_ |
+| **FR** | FR-BASE-008-05-11 |
+| **Tests** | `TestClaimLockGuard.test_calculated_fields_are_not_written_by_hand`, `TestClaimVehicleLockTiers.test_line_totals_are_not_written_by_hand` |
+
 ---
 
 ## 3. Python Constraints (`@api.constrains`)
@@ -456,16 +657,6 @@ See C-168 (incentive payout).
 | **File** | `models/insurance_offer.py` (line ~677) |
 | **Constrains** | `is_negotiation_scenario`, `previous_offer_id` |
 | **Errors** | _"A negotiation scenario must have a parent offer."_ / _"A negotiation scenario's parent must be an actual offer, not another scenario."_ |
-
-#### C-09-01 — Medical offer skips base coverage check
-
-| Attribute | Value |
-|-----------|-------|
-| **Module** | `optimum_insurance_medical` |
-| **Model** | `insurance.offer` (inherited) |
-| **File** | `models/insurance_offer.py` (line ~134) |
-| **Constrains** | `coverage_ids`, `stage` (must repeat the base triggers — re-declaring `@api.constrains` replaces them) |
-| **Behavior** | Overrides base `_check_has_coverage` — skips coverage check for medical offers (uses medical categories instead); non-medical offers keep the base check |
 
 ### C-10 — Client must have exactly one specialized record
 
@@ -1131,6 +1322,123 @@ This pattern is replicated across all type-specific junction tables:
 | **FR** | FR-BASE-007-08-14 |
 | **Tests** | `TestEndorsementDocument.test_02_applying_without_the_document_is_refused`, `test_03_scheduling_without_the_document_is_refused`, `test_05_an_applied_endorsement_keeps_its_document`, `test_06_a_reverted_endorsement_may_drop_its_document` |
 
+### C-217 — A Lost request has its reason
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.request` |
+| **File** | `models/insurance_request.py` (`_check_lost_has_reason`) |
+| **Constrains** | `state`, `failure_reason_id` |
+| **Condition** | `state` is `failed` and `failure_reason_id` is empty. Example: `write({'state': 'failed'})` on REQ-0012 → refused; the Lost button with the reason "Too expensive" → Lost |
+| **Error** | _"Request %s cannot be Lost without a reason."_ |
+| **FR** | FR-BASE-004-09-02 |
+| **Tests** | `TestRequestStages.test_lost_needs_its_reason` |
+
+### C-218 — A Won request has its policy
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.request` |
+| **File** | `models/insurance_request.py` (`_check_won_has_policy`) |
+| **Constrains** | `state` |
+| **Condition** | `state` is `won` and `policy_generated` is false. Example: `write({'state': 'won'})` on an open REQ-0012 → refused. Deleting POL-0042, the policy of a Won request, is allowed: `_reopen_requests` moves the offer, then the request, back (FR-BASE-006-12-06) |
+| **Error** | _"Request %s cannot be Won without a policy."_ |
+| **FR** | FR-BASE-004-02-07, FR-BASE-006-12-06 |
+| **Tests** | `TestRequestStages.test_won_needs_its_policy`, `test_deleting_the_policy_reopens_its_request` |
+
+### C-253 — A vehicle request needs a vehicle before it gets an offer
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_vehicle` |
+| **Model** | `insurance.offer` |
+| **File** | `models/insurance_offer.py` (`_check_request_has_vehicle`) |
+| **Constrains** | `insurance_request_id`, `insurance_type_id` |
+| **Condition** | The offer's type applies to vehicles and its request has no vehicles. Example: an offer created on REQ-0031 (Private Motor, 0 vehicles) → refused; after one vehicle is added to REQ-0031 → created |
+| **Error** | _"Request '%s' has no vehicles. Add at least one vehicle before creating offers."_ |
+| **FR** | FR-VEH-004-02-01 |
+| **Tests** | `TestVehicleConstraints.test_offer_refused_on_request_without_vehicles`, `TestVehicleConstraints.test_offer_cannot_move_to_request_without_vehicles` |
+
+### C-254 — A number plate is an Egyptian plate of the 2008 format or later
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_vehicle` |
+| **Model** | `client.insurable.vehicle` |
+| **File** | `models/client_insurable_vehicle.py` (`_check_number_plate_format`); rule in `tools/number_plate.py` |
+| **Constrains** | `number_plate` |
+| **Condition** | The plate is filled and is not 1 to 3 letter-section symbols (at least one letter, from أ ب ج د ر س ص ط ع ف ق ل م ن ه و ى; D-297) followed by 1 to 4 digits. `create()` and `write()` first rewrite the typed plate to its stored spelling. Digits are always stored as Arabic-Indic digits; Latin digits are converted on save (D-302). Example: `ا ب ج 1234` → saved as `أ ب ج ١٢٣٤`; `أ 1` → saved as `أ ١` (custom); `231 1 أ س` → saved as `١ أ س ٢٣١` (diplomatic); `أبج 1234` and `231 1أس` (no space between the letters, D-299) → refused; `12345` (pre-2008, no letter), `ش ش 1` (ش is not a plate letter), `ABC-1234`, `أ ب ج د ١٢٣` → refused. An empty plate is allowed. The vehicle import applies the same rule per row (FR-VEH-008-02-05). Records saved before this rule are checked only when their plate is next written |
+| **Error** | _"'%(plate)s' is not a valid Egyptian number plate (vehicle %(name)s). Accepted plates: ..."_ then the same in Arabic: _"«%(plate)s» ليست لوحة معدنية مصرية صحيحة (المركبة %(name)s). اللوحات المقبولة: ..."_ |
+| **FR** | FR-VEH-001-04-01, FR-VEH-001-04-02, FR-VEH-001-04-03, FR-VEH-001-04-05, FR-VEH-001-04-06 |
+| **Tests** | `TestVehicleNumberPlate.test_accepted_plates_are_saved_in_the_stored_spelling`, `test_refused_plates`, `test_empty_plate_is_allowed`, `test_write_follows_the_same_rule`, `test_import_refuses_a_plate_that_is_not_egyptian` |
+
+### C-246 — A rejected claim has its reason
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.claim` |
+| **File** | `models/insurance_claim.py` (`_check_rejected_has_reason`, `write`) |
+| **Constrains** | `state`, `denial_reason_id` |
+| **Condition** | `state` is `rejected` and `denial_reason_id` is empty; and a user write of `state = 'rejected'` (a drag or status-bar move) is refused in `write()`, only the Reject wizard (`_reject`, superuser) rejects. `_reject` first runs `check_access('write')` as the caller, so a user who can only read claims (ACL or record rule) gets an `AccessError` and the claim stays open. Example: dragging the card of CLM/0042 onto Rejected → refused; the Reject button with the reason "Not covered by the policy" → Rejected |
+| **Error** | _"Use the Reject button: it asks for the reason."_ (write); _"Claim %s cannot be Rejected without a reason."_ (constraint) |
+| **FR** | FR-BASE-008-05-04 |
+| **Tests** | `TestClaimStatus.test_drag_to_rejected_is_refused`, `test_the_reason_is_required`, `test_any_open_state_can_be_rejected`, `test_reject_refused_without_write_access` |
+
+### C-231 — An item names what its purpose carries
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery.item` |
+| **File** | `models/collection_trip_item.py` (`_check_document_required`) |
+| **Constrains** | `purpose`, `related_document_id` |
+| **Condition** | the purpose is in `PURPOSE_MODEL_MAP` and `related_document_id` is empty. `other` needs none, but such a trip is then not assigned (C-237). Example: a Cheque item with no cheque → refused |
+| **Error** | _"A related document is required for '%s' items."_ |
+| **FR** | FR-BASE-015-02-01, FR-COL-002-02-04 |
+| **Tests** | `TestPendingItems.test_a_cheque_item_needs_its_cheque` |
+
+### C-232 — A trip carries one team's items
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery.item` |
+| **File** | `models/collection_trip_item.py` (`_check_one_team`; also checked first in `action_create_trip`, C-240) |
+| **Constrains** | `trip_id`, `team` |
+| **Condition** | the item's team differs from its trip's. Example: claim papers put on a collection-team trip → refused |
+| **Error** | _"%(item)s is the %(team)s team's: it cannot go on %(trip)s."_ |
+| **FR** | FR-COL-013-02-01 (D-40) |
+| **Tests** | `TestClaimNeeds.test_a_trip_carries_one_teams_items` |
+
+### C-233 — Failed needs its reason; Left at Office only on a direct leg
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery.item` |
+| **File** | `models/collection_trip_item.py` (`_check_result`) |
+| **Constrains** | `result`, `failure_reason`, `leg` |
+| **Condition** | `result` is `failed` with a blank `failure_reason`; or `result` is `left_at_office` and the leg is not in `ONWARD` (insurer → client or client → insurer, straight). Example: Failed on the policy document with no reason → refused; Left at Office on an office → client item → refused |
+| **Error** | _"Write the failure reason before marking it failed: %s"_; _"Only an item going straight from the insurer to the client, or back, is left at the office: %s"_ |
+| **FR** | FR-COL-012-05-02, FR-COL-001-06 |
+| **Tests** | `TestTripFlow.test_an_item_fails_only_with_its_reason`, `TestLeftAtOffice.test_only_a_direct_item_on_the_road_is_left_at_the_office` |
+
+### C-234 — A report period runs forward
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `collection.payment.report.wizard`, `collection.route.plan.wizard` |
+| **File** | `wizard/collection_payment_report_wizard.py` and `wizard/collection_route_plan_wizard.py` (`_check_period`) |
+| **Constrains** | `date_from`, `date_to` |
+| **Condition** | `date_from > date_to`. Example: 1 Nov to 31 Oct → refused |
+| **Error** | _"The period ends before it starts."_ |
+| **FR** | FR-COL-011-01-01, FR-COL-009-01-01 |
+| **Tests** | `TestPaymentReport.test_the_period_is_this_month_by_default_and_runs_forward` (the route plan's is not tested) |
+
 ---
 
 ## 4. SQL Constraints (`models.Constraint`)
@@ -1500,6 +1808,19 @@ This pattern is replicated across all type-specific junction tables:
 | **FR** | FR-BASE-009-04-13 |
 | **Tests** | `TestContractRenewal.test_05_a_contract_is_renewed_once` |
 
+### C-220 — A policy has one renewal request, Lost or not
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.request`, `insurance.policy` |
+| **File** | `models/insurance_request.py` (`_one_renewal_per_policy`); `models/insurance_policy.py` (`_create_renewal_request` pre-check, `_cron_create_renewal_requests` domain `('renewal_request_id', '=', False)`) |
+| **SQL** | `UNIQUE(previous_policy_id) WHERE previous_policy_id IS NOT NULL` (a partial unique index: requests that renew nothing are free). The Python pre-check gives the readable message first; the index is the final guard |
+| **Condition** | a second request with the same `previous_policy_id`. Example: POL-0042 has REQ-A, draft or Lost → the daily job skips POL-0042, and `_create_renewal_request` is refused; a Lost REQ-A comes back with Reopen by an administrator (FR-BASE-004-09-03), never as a second request |
+| **Error** | Pre-check: _"Policy %(policy)s already has its renewal request (%(request)s). A Lost one is reopened by an administrator."_ Index: _"This policy already has its renewal request."_ (an `IntegrityError` in Python) |
+| **FR** | BR-BASE-004-02-05, FR-BASE-004-06-05 |
+| **Tests** | `TestPolicyRenewal.test_one_renewal_request_per_policy`, `test_job_creates_the_renewal_request`, `test_not_renewing_on_the_renewal_request` |
+
 ---
 
 ## 5. Foreign Key Restrictions (`ondelete='restrict'`)
@@ -1805,13 +2126,13 @@ See C-168 (incentive payout).
 | Attribute | Value |
 |-----------|-------|
 | **Module** | `optimum_insurance_collection` |
-| **Model** | `insurance.cheque`, `insurance.collection.delivery` |
-| **File** | `models/insurance_cheque.py` (`_collection_is_paper`, `_collection_waiting`, `_collection_ensure_payment_letter_trip`, `write`), `models/collection_trip.py` (`_generate_cheque_handover_trips`, `_generate_payment_letter_trips`) |
-| **Mechanism** | predicate `_collection_is_paper` (`payment_method == 'cheque'`) used by `_collection_waiting` and the payment-letter hook; domain leaf `('payment_method', '=', 'cheque')` in the two cron searches; `write()` withdraws a record switched away from cheque from trips still draft/assigned and re-runs the trip hooks on a `payment_method` change (D-177) |
-| **Condition** | A cash or bank-transfer record never gets a handover or payment-letter trip, whether it was created that way or corrected later; its installments still count as having their payment, so the policy's cheques are handed over without it |
-| **Error** | — (silently not carried) |
+| **Model** | `insurance.cheque`, `insurance.collection.delivery.item`, `insurance.collection.custody` |
+| **File** | `models/insurance_cheque.py` (`_collection_is_paper`, `_collection_waiting`, `_collection_ensure_payment_letter`, `write`), `models/collection_trip_item.py` (`_generate_cheque_handover_needs`, `_source_still_wanted`), `models/collection_custody.py` (`init`, the SQL view), `views/insurance_cheque_views.xml` |
+| **Mechanism** | predicate `_collection_is_paper` (`payment_method == 'cheque'`) used by `_collection_waiting`, the payment-letter hook and `_source_still_wanted` (so neither the daily onward listing from the office nor a redo after a failure lists it again); domain leaf `('payment_method', '=', 'cheque')` in the handover cron search (the letter cron starts from completed cheque items, so the hook's check covers it); `write()` withdraws a record switched away from cheque from what has not set out and re-runs the hooks on a `payment_method` change; the Document Tracking view takes `payment_method = 'cheque'` rows only, and the cheque form hides the trip and custody fields otherwise (D-177) |
+| **Condition** | A cash or bank-transfer record never gets an item to the insurer or a payment letter, and is not on Document Tracking, whether it was created that way or corrected later; its installments still count as having their payment, so the policy's cheques are listed without it. A record with no method (written before the base field existed) is treated as not a cheque |
+| **Error** | — (silently not listed) |
 | **FR** | FR-COL-001-03-10 |
-| **Tests** | `TestGenerator.test_a_cash_payment_is_never_carried`, `TestGenerator.test_a_cash_row_counts_as_in_but_only_cheques_travel`, `TestGenerator.test_a_cheque_switched_to_cash_leaves_the_handover_still_to_leave`, `TestGenerator.test_a_handed_over_cheque_switched_to_cash_gets_no_letter`, `TestGenerator.test_a_cash_row_switched_to_cheque_joins_the_handover_at_once` |
+| **Tests** | `TestChequeNeeds.test_a_cash_payment_is_never_listed`, `test_a_cash_row_counts_as_in_but_only_cheques_are_listed`, `test_a_cheque_switched_to_cash_leaves_a_trip_still_to_leave`, `test_a_handed_over_cheque_switched_to_cash_gets_no_letter`, `test_a_cheque_left_at_the_office_then_switched_to_cash_goes_no_further`, `test_a_cash_row_switched_to_cheque_is_listed_at_once`; `TestDocumentTracking.test_a_cash_record_is_not_a_paper` |
 
 ---
 
@@ -1868,6 +2189,116 @@ See C-168 (incentive payout).
 | **Error** | changed: _"Batch %(batch)s changed since the statement was prepared. Press Send again. ⏎ تغيرت الدفعة %(batch)s بعد إعداد الكشف. اضغط إرسال مرة أخرى."_; cancelled / confirmed: _"Batch %(batch)s is %(state)s and cannot be sent. ⏎ الدفعة %(batch)s %(state)s ولا يمكن إرسالها."_; scheduled: _"A commission statement cannot be scheduled. Send it now. ⏎ لا يمكن جدولة كشف العمولة. أرسله الآن."_ |
 | **FR** | FR-BASE-013-08-01 |
 | **Tests** | `TestCommissionBatch.test_33_a_line_added_after_the_composer_opened_refuses_the_post`, `test_34_a_cancelled_batch_refuses_the_post`, `test_35_the_statement_cannot_be_scheduled` |
+
+### C-219 — An offer is not accepted while its request is Lost
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.offer`, `accept.offer.wizard` |
+| **File** | `models/insurance_offer.py` (`_check_acceptable`, called by `action_accept_offer` and by the wizard's `action_accept`) |
+| **Condition** | the offer's request is in `failed`. Example: REQ-0012 is Lost with its offer at Client Accepted → Accept refused from the button and the wizard; after Reopen by an administrator → accepted |
+| **Error** | _"Cannot accept offer: Its request is Lost. An administrator must reopen it first."_ |
+| **FR** | FR-BASE-005-07-08 |
+| **Tests** | `TestAcceptOfferWizardDocument.test_no_offer_is_accepted_once_its_request_is_lost` |
+
+### C-253 — A policy is created only by accepting an offer
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.policy` |
+| **File** | `models/insurance_policy.py` (`create`, `_issue_from_offer`); the only caller is `accept.offer.wizard._action_accept` |
+| **Mechanism** | `create()` guard. `_issue_from_offer()` puts a Python object in the context as a pass; RPC and import carry JSON, so neither can send it, and the method is private, so neither can call it. No bypass, superuser included (D-294) |
+| **Condition** | `create()` is reached without the pass. Example: an administrator imports a policy file, or types a new number in a policy picker and presses "Create and edit" → refused; a pricing team leader presses Accept on OFF-0031 and confirms the wizard → POL-0031 is created |
+| **Error** | _"A policy cannot be created directly: it is issued only by accepting an offer."_ |
+| **FR** | FR-BASE-006-16-01 |
+| **Tests** | `TestAcceptOfferWizardDocument.test_a_policy_is_created_only_by_accepting_an_offer` |
+
+### C-235 — A trip cannot be duplicated
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery` |
+| **File** | `models/collection_trip.py` (`copy`) |
+| **Condition** | always: a copy would carry the same cheques and documents a second time. Example: Duplicate on TRIP/2026/0007 → refused |
+| **Error** | _"A trip cannot be duplicated: a copy would carry the same cheques and documents twice. Create a new trip instead."_ |
+| **FR** | FR-COL-002-07-02 (D-25) |
+| **Tests** | `TestTripFlow.test_a_trip_cannot_be_duplicated` |
+
+### C-236 — Each trip action starts from its own states
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery` |
+| **File** | `models/collection_trip.py` (`_require_state`, in `action_assign`, `action_start`, `action_complete`, `action_cancel`, `action_reset_to_draft`) |
+| **Condition** | Assign from `draft`; Start from `assigned`; Complete from `in_progress` (a closed trip gets "Already closed"); Cancel from `draft`, `assigned` or `in_progress`; Reset to Draft from `cancelled`. Through C-224 a board drag gets the same checks. Example: a draft dragged to Completed → refused |
+| **Error** | _"Only a draft trip can be assigned: %s"_; _"Only an assigned trip can start: %s"_; _"Already closed: %s"_; _"Start the trip before completing it: %s"_; _"Already closed, so it cannot be cancelled: %s"_; _"Only a cancelled trip goes back to draft: %s"_ |
+| **FR** | FR-BASE-015-05-01, FR-COL-003-04-02, FR-COL-012-06-01, FR-COL-012-07 |
+| **Tests** | `TestTripFlow.test_a_draft_dragged_to_completed_is_refused`, `test_only_a_cancelled_trip_goes_back_to_draft`, `test_a_completed_trip_stays_closed` |
+
+### C-237 — A trip says everything before an agent takes it
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery` |
+| **File** | `models/collection_trip.py` (`_check_ready`, on Assign and again on Start; `action_assign`) |
+| **Mechanism** | choosing the agent runs Assign (D-37), so the check fires on the agent field too. Checked again on Start because items may be added in between |
+| **Condition** | no `scheduled_date`; no item; an item without its sender, or without its receiver (a bank leg needs none); an item naming no document; on Assign, no agent. Example: TRIP/2026/0009 with the policy document but no date → choosing Sayed is refused, naming Scheduled Date |
+| **Error** | _"Trip %(trip)s cannot be assigned before it has: %(fields)s."_; _"Trip %(trip)s cannot be assigned: %(item)s has no %(fields)s."_; _"Trip %(trip)s cannot be assigned: %(count)d item(s) do not name what they carry. …"_; _"Please assign an employee before confirming."_ |
+| **FR** | FR-COL-002-04-05, FR-COL-002-02-05, FR-COL-003-02-02 (D-37) |
+| **Tests** | `TestTripFlow.test_a_trip_missing_an_end_or_its_date_is_not_assigned`, `test_a_trip_with_nothing_on_it_is_not_assigned`, `test_a_drag_to_assigned_without_an_agent_is_refused`, `TestPendingItems.test_a_trip_with_an_unnamed_item_is_not_assigned` |
+
+### C-238 — A trip is completed with every item's result and its cost
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery` |
+| **File** | `models/collection_trip.py` (`action_complete`, `_check_cost`) |
+| **Condition** | an item of the trip has no result; or `cost <= 0`. Example: TRIP/2026/0007 with CHQ-13 still without a result → refused, naming it; all results given but no cost → refused |
+| **Error** | _"Trip %(trip)s cannot be completed: give every item its result first (%(items)s)."_; _"Enter the trip cost before completing it: %s"_ |
+| **FR** | FR-COL-012-06-01, FR-COL-002-04-09 (D-32) |
+| **Tests** | `TestTripFlow.test_the_trip_is_completed_once_every_item_has_its_result`, `test_no_trip_is_completed_without_its_cost`, `test_a_drag_to_completed_needs_the_items_results` |
+
+### C-239 — A trip with a result is completed, not cancelled
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery` |
+| **File** | `models/collection_trip.py` (`action_cancel`) |
+| **Condition** | any item of the trip has a result. Example: TRIP/2026/0007 with CHQ-12 Completed → Cancel refused |
+| **Error** | _"%s has items with their result: give the others theirs and complete it instead."_ |
+| **FR** | FR-COL-012-07-01 |
+| **Tests** | `TestTripFlow.test_a_trip_with_a_result_is_not_cancelled` |
+
+### C-240 — Create Trip takes free items of one team
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery.item` |
+| **File** | `models/collection_trip_item.py` (`action_create_trip`) |
+| **Condition** | nothing is selected; a selected item has a result, or is on a trip that is not cancelled; the selection mixes the claims team's items with the collection team's (C-232). Example: Create Trip on CHQ-12, already on draft TRIP/2026/0007 → refused |
+| **Error** | _"Select the items to put on the trip."_; _"Already on a trip, or done: %s"_; _"A trip carries the items of one team: select the claims' items or the others, not both."_ |
+| **FR** | FR-COL-012-03-01, FR-COL-013-02-01 |
+| **Tests** | `TestPendingItems.test_an_item_on_a_trip_or_done_is_not_taken_twice`, `TestClaimNeeds.test_a_trip_carries_one_teams_items` |
+
+### C-247 — Only the team leader and the administrator reopen a closed claim
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Model** | `insurance.claim` |
+| **File** | `models/insurance_claim.py` (`action_back_to_fresh`; the button also carries `groups=` in `views/insurance_claim_views.xml`) |
+| **Condition** | the user is neither superuser, nor an administrator (`base.group_system`), nor in Customer Service Team Leader. Example: Mona, Customer Service, presses Back to Fresh on settled CLM/0042 → refused; the team leader presses it → CLM/0042 is Fresh, its rejection reason cleared, `settled_on` kept until it settles again (D-283). After the group gate, `check_access('write')` runs as the caller before the superuser write, so write access on the claim is also required (every group that passes the gate has it, so it is a safeguard, not tested separately) |
+| **Error** | _"Only the Customer Service Team Leader or an administrator can reopen a claim."_ (`AccessError`) |
+| **FR** | FR-BASE-008-05-06 |
+| **Tests** | `TestClaimStatus.test_back_to_fresh_refused_for_customer_service`, `test_back_to_fresh_reopens_a_rejected_claim`, `test_back_to_fresh_reopens_a_settled_claim`, `test_a_closed_claim_leaves_by_back_to_fresh_only`, `test_resettled_claim_is_stamped_again`, `test_header_and_kanban` |
 
 ---
 
@@ -2243,6 +2674,20 @@ One control lists every view rule of one feature's screens, row by row.
 | Renew once, accountant and sysadmin only (C-211, D-225); a confirm dialog first | `views/insurance_company_contract_views.xml` (form header) | button `action_renew` | `invisible="renewal_id"`, `groups="optimum_insurance_base.group_insurance_accountant,base.group_system"` |
 | The renewal chain is shown, never edited (C-212) | `views/insurance_company_contract_views.xml` (Contract Period group) | `renewed_from_id`, `renewal_id` | `readonly="1"`, `invisible="not <field>"` |
 
+### C-252 — A client pre-filled by the opening screen is read-only
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base`, `optimum_insurance_vehicle`, `optimum_insurance_medical`, `optimum_insurance_general`, `optimum_insurance_shipment` |
+| **Mechanism** | view `readonly` on the context default, with `force_save="1"` so the pre-filled value is still saved. View-level only: `write()` does not refuse a change. |
+| **FR** | FR-BASE-001-03-08 |
+| **Tests** | none (view-level) |
+
+| Rule | View | Field / button | Condition |
+|---|---|---|---|
+| The owner of an insurable opened from a client, request, offer, policy, endorsement, negotiated-offer or inspection screen is not edited | `views/client_insurable_vehicle_views.xml`, `views/client_insurable_employee_views.xml`, `views/client_insurable_estate_views.xml`, `views/client_insurable_shipment_views.xml` (form) | `client_id` | `readonly="context.get('default_client_id')"` |
+| The side of an employment record given by the client form it was opened from is not edited | `views/corporate_client_individual_views.xml` (form) | `corporate_client_id`, `individual_id` | `readonly="context.get('default_corporate_client_id')"`, `readonly="context.get('default_individual_id')"` |
+
 ---
 
 ## 8. Post-Policy Generation Immutability
@@ -2430,24 +2875,88 @@ When a policy is generated from an accepted offer on an `insurance.request`, all
 | `insurance.commission.batch.reason.wizard` | `optimum_insurance_base.group_insurance_accountant` | 1 | 1 | 1 | 0 |
 | `insurance.commission.batch.reason.wizard` | `base.group_system` | 1 | 1 | 1 | 1 |
 
+### C-216 — States, districts and areas: everyone reads, only the administrator edits
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_base` |
+| **Mechanism** | ACL rows in `security/ir.model.access.csv`. For states, the module overrides Odoo core's row `base.access_res_country_state_group_user` so *Contact Creation* (`base.group_partner_manager`) keeps read only, and adds a full row for `base.group_system`, which doesn't imply *Contact Creation*. Countries need no row: core already makes them admin-only. |
+| **Error** | Odoo's standard access error (_"You are not allowed to modify ..."_) |
+| **FR** | FR-BASE-017-01-04, FR-BASE-017-01-05 |
+| **Tests** | `TestGeographyAccess` |
+
+| Model | Group | Read | Write | Create | Delete |
+|---|---|---|---|---|---|
+| `res.country.state` | `base.group_partner_manager` (core row, overridden) | 1 | 0 | 0 | 0 |
+| `res.country.state` | `base.group_system` | 1 | 1 | 1 | 1 |
+| `res.country.state.district` | `base.group_user` | 1 | 0 | 0 | 0 |
+| `res.country.state.district` | `base.group_system` | 1 | 1 | 1 | 1 |
+| `res.country.state.district.area` | `base.group_user` | 1 | 0 | 0 | 0 |
+| `res.country.state.district.area` | `base.group_system` | 1 | 1 | 1 | 1 |
+
+### C-241 — Collection roles: who may touch trips and items
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Mechanism** | ACL rows in `security/ir.model.access.csv`. Base models (`insurance.cheque`, `policy.payment.schedule`, `insurance.policy`, `insurance.policy.endorsement`, `client`; `insurance.claim` for the claims team) are read-only to the collection groups. Trips and items are written with the user's own rights; listing and the paper's place run with the system's (D-24, C-230) |
+| **Error** | Odoo's standard access error |
+| **FR** | FR-COL-010-01-01 to FR-COL-010-01-05 |
+| **Tests** | `TestAccess`, `TestClaimNeeds.test_each_team_sees_its_own` |
+
+| Model | Group | Read | Write | Create | Delete |
+|---|---|---|---|---|---|
+| `insurance.collection.delivery` | scheduler, manager, claims | 1 | 1 | 1 | 0 |
+| `insurance.collection.delivery` | `base.group_system` | 1 | 1 | 1 | 1 |
+| `insurance.collection.delivery.item` | scheduler, manager, claims, `base.group_system` | 1 | 1 | 1 | 1 |
+| `insurance.collection.custody` (Document Tracking) | scheduler, manager, claims, `base.group_system` | 1 | 0 | 0 | 0 |
+
+Open: the scheduler's and the manager's rows are the same, and no button carries `groups=`, while FR-COL-010-01-02 gives assigning, results and costs to the manager only (review 2026-11-10).
+
+### C-242 — Each team sees its own trips, items and papers
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.collection.delivery`, `insurance.collection.delivery.item`, `insurance.collection.custody` |
+| **Mechanism** | record rules in `security/security.xml`: `[('team', '=', 'collection')]` for the scheduler (and so the manager), `[('team', '=', 'claims')]` for the claims group, `[(1, '=', 1)]` for `base.group_system` |
+| **Condition** | a user reads or writes a record of the other team. Example: the claims team does not see the CHQ-12 item; the collection lead does not see a claim's papers |
+| **Error** | records are filtered out; a direct access raises Odoo's standard access error |
+| **FR** | FR-COL-013-02-02, FR-COL-013-02-03 |
+| **Tests** | `TestClaimNeeds.test_each_team_sees_its_own`, `TestDocumentTracking` |
+
+### C-243 — The claims team reads claims, never writes them
+
+| Attribute | Value |
+|-----------|-------|
+| **Module** | `optimum_insurance_collection` |
+| **Model** | `insurance.claim` |
+| **Mechanism** | ACL read row plus a read-only record rule `rule_insurance_claim_collection_claims` (`[(1, '=', 1)]`, read only) for `group_insurance_collection_claims` |
+| **Condition** | a claims-team member writes, creates or deletes a claim → refused. Reading covers every claim |
+| **Error** | Odoo's standard access error |
+| **FR** | FR-COL-010-01-05 |
+| **Tests** | `TestClaimNeeds.test_each_team_sees_its_own` |
+
+Open: FR-COL-010-01-05 says the team reads "the claims its items name"; the rule reads all claims (review 2026-11-10).
+
 ---
 
 ## Summary
 
 | Category | Count |
 |----------|-------|
-| Delete Prevention (unlink) | 10 (C-190, C-198 added by commission-batch-receipts) |
-| Write Validation (write) | 24 (C-183, C-186, C-187, C-188, C-194, C-195, C-196, C-197, C-207, C-208, C-212, C-215 added) |
-| Python Constraints (@api.constrains) | 61 (with sub-controls; C-177, C-178 are formula figure constraints; C-179 to C-182, C-184, C-191 to C-193, C-201, C-202, C-205 added; C-134 retired → C-184, not counted; C-185 moved to SQL UNIQUE, D-211; C-210 added, D-219) |
-| SQL UNIQUE Constraints | 25 (with sub-controls; C-185 partial unique index, D-211; C-211 a contract is renewed once, D-226) |
+| Delete Prevention (unlink) | 12 (C-190, C-198 added by commission-batch-receipts; C-221, C-222 collection trips and items) |
+| Write Validation (write) | 36 (C-251 a claim's calculated fields are set only by the system; C-245 a claim is settled only when ready, C-248 a new claim starts Fresh, C-249 a claim needs an expected settlement date; C-183, C-186, C-187, C-188, C-194, C-195, C-196, C-197, C-207, C-208, C-212, C-215 added; C-223 to C-230 collection; C-244 claim lock tiers, D-279) |
+| Python Constraints (@api.constrains) | 70 (with sub-controls; C-254 a number plate is an Egyptian plate, D-295; C-250 the closing stamps exist only on a closed claim, D-292; C-246 a rejected claim has its reason, D-281; C-217, C-218 added; C-177, C-178 are formula figure constraints; C-179 to C-182, C-184, C-191 to C-193, C-201, C-202, C-205 added; C-134 retired → C-184, not counted; C-185 moved to SQL UNIQUE, D-211; C-210 added, D-219; C-231 to C-234 collection) |
+| SQL UNIQUE Constraints | 26 (with sub-controls; C-185 partial unique index, D-211; C-211 a contract is renewed once, D-226; C-220 a policy has one renewal request) |
 | SQL CHECK Constraints | 11 (with sub-controls) |
 | Foreign Key Restrictions (ondelete restrict) | 55 rows (53 controls: C-148 covers three FKs; C-213 added) |
-| Action Method Guards | 23 (C-189, C-199, C-200, C-206, C-209 added; C-189's confirm checks also re-run from a line `@api.constrains` on a correction in Confirmed, D-239, counted here once) |
+| Action Method Guards | 32 (C-253 a policy is created only by accepting an offer, D-294; C-247 only the team leader and the administrator reopen a closed claim, D-283; C-189, C-199, C-200, C-206, C-209, C-219 added; C-235 to C-240 collection; C-189's confirm checks also re-run from a line `@api.constrains` on a correction in Confirmed, D-239, counted here once) |
 | Post-Policy Immutability | 13 (C-126 through C-132, with sub-controls C-130-01 to C-130-04, C-131-01, C-131-02) |
-| Conditional View Readonly | 10 patterns (with 4 extensions) |
+| Conditional View Readonly | 10 patterns (with 4 extensions); C-252, a client pre-filled by the opening screen |
 | Always-Readonly View Fields | 100+ fields across all modules (incl. C-170, incentive payouts) |
 | No-Create Relational Pickers | 1 pattern (with 2 extensions) |
 | Feature Screen Rules (7d) | 2 (C-204, the batch-receipt screens; C-214, contract renewal) |
-| Field Access Controls (groups=, ACL) | 3 (C-136, C-169; C-203 the batch-receipt models' ACL) |
+| Field Access Controls (groups=, ACL) | 7 (C-136, C-169; C-203 the batch-receipt models' ACL; C-216 geography is admin-edited; C-241 to C-243 collection roles, team rules, claims read) |
 | Amended by commission-batch-receipts | C-136 (flat flag gated), C-140 (the cleared lock also covers the method and transfer fields), C-143 (receipt pointer and `is_commission_batched` system-set), C-151 (the scan is a cheque's only) |
-| **Total named controls** | **C-01 through C-215 (with sub-controls; C-134 retired)** |
+| **Total named controls** | **C-01 through C-254 (with sub-controls; C-134 retired)** |
